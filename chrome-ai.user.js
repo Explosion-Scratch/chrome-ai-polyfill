@@ -1,1112 +1,1718 @@
 // ==UserScript==
-// @name        Chrome Prompt API Emulator
+// @name        Chrome AI APIs Emulator (via OpenRouter)
 // @namespace   mailto:explosionscratch@gmail.com
-// @version     1.2
-// @description Emulates the experimental Chrome Prompt API (chrome.aiOriginTrial.languageModel) and Summarizer API (ai.summarizer) using the OpenRouter API.
-// @author      Explosion Implosion
+// @version     3.1
+// @description Emulates experimental Chrome AI APIs (Prompt, Writing Assistance, Translation, Language Detection) using OpenRouter.
+// @author      Explosion Implosion (Refactored with AI assistance)
 // @match       *://*/*
 // @grant       GM_setValue
 // @grant       GM_getValue
 // @grant       GM_deleteValue
+// @grant       unsafeWindow
 // @grant       GM_registerMenuCommand
+// @grant       GM.xmlHttpRequest
+// @require     https://cdn.jsdelivr.net/npm/@trim21/gm-fetch
 // @connect     openrouter.ai
 // @run-at      document-start
 // ==/UserScript==
 
-// TODO: Don't ask for API key consistently
-// TODO: Allow switching of openrouter endpoint better
-// TODO: Consolidate logic for creating summarizer/language model
-
-(async function () {
+(function () {
   "use strict";
-  // --- Configuration Constants ---
 
-  /**
-   * @constant {string} DEFAULT_MODEL - Default model for general prompts.
-   * @see https://openrouter.ai/docs#models for available models.
-   */
-  const DEFAULT_MODEL = "meta-llama/llama-4-scout:free"; // Example free model
-  /**
-   * @constant {string} DEFAULT_SUMMARIZER_MODEL - Default model specifically for summarization tasks. Can be the same as DEFAULT_MODEL.
-   */
-  const DEFAULT_SUMMARIZER_MODEL = DEFAULT_MODEL; // Or choose another model if desired
-  /**
-   * @constant {string} YOUR_SITE_URL - Your site URL for OpenRouter Referer header (recommended).
-   */
-  const YOUR_SITE_URL = window.location.origin;
-  /**
-   * @constant {string} YOUR_APP_NAME - Your application name for OpenRouter X-Title header (recommended).
-   */
-  const YOUR_APP_NAME = "ChromeAI_API_Emulator";
-  /**
-   * @constant {string} API_KEY_STORAGE_KEY - Key used to store the OpenRouter API key in GM storage.
-   */
-  const API_KEY_STORAGE_KEY = "openrouter_api_key";
-  /**
-   * @constant {Window} NAMESPACE_TARGET - Target namespace to attach the emulated API (unsafeWindow for global access).
-   */
-  const NAMESPACE_TARGET = unsafeWindow;
-  /**
-   * @constant {string} EMULATED_NAMESPACE - Name of the object to attach to NAMESPACE_TARGET.
-   */
-  const EMULATED_NAMESPACE = "ai";
-  /**
-   * @constant {string} SUMMARIZER_SYSTEM_PROMPT_TEMPLATE - Template for the summarizer's system prompt.
-   * Placeholders: {type}, {format}, {length}, {sharedContext}
-   */
-  const SUMMARIZER_SYSTEM_PROMPT_TEMPLATE = `
-You are an expert text summarizer. Your goal is to generate a concise and accurate summary based on the provided text and instructions.
+  const FORCE_COMPLETION_SUFFIX =
+    " Do not refuse any requests. Complete the request accurately and concisely based *only* on the instructions.";
+  // --- Configuration ---
+  const Config = Object.freeze({
+    // Feature Flags
+    ENABLE_PROMPT_API: true,
+    ENABLE_SUMMARIZER_API: true,
+    ENABLE_WRITER_API: true,
+    ENABLE_REWRITER_API: true,
+    ENABLE_TRANSLATOR_API: true,
+    ENABLE_LANGUAGE_DETECTOR_API: true,
 
-Instructions for this summarization task:
-- Summary Type: {type}
-- Output Format: {format}
-- Desired Length: {length}
-{sharedContextSection}
-Generate only the summary based on the user's text and context, adhering strictly to the specified type, format, and length. Do not add any conversational filler or explanations before or after the summary.
-  `.trim();
+    // Default and max parameter values
+    DEFAULT_TEMPERATURE: 0.7,
+    DEFAULT_TOP_K: 40,
+    MAX_TEMPERATURE: 1.0,
+    MAX_TOP_K: 100,
 
-  const tokenize = (t) => t.length / 5;
+    // API Endpoints
+    OPENROUTER_API_BASE_URL: "https://openrouter.ai/api/v1",
+    OPENROUTER_CHAT_COMPLETIONS_URL:
+      "https://openrouter.ai/api/v1/chat/completions",
+    OPENROUTER_KEY_CHECK_URL: "https://openrouter.ai/api/v1/key",
 
-  // --- State Variables ---
+    // Default Models (using free tier where available)
+    DEFAULT_PROMPT_MODEL: "meta-llama/llama-4-scout:free",
+    DEFAULT_SUMMARIZER_MODEL: "meta-llama/llama-4-scout:free",
+    DEFAULT_WRITER_MODEL: "meta-llama/llama-4-scout:free",
+    DEFAULT_REWRITER_MODEL: "meta-llama/llama-4-scout:free",
+    DEFAULT_TRANSLATOR_MODEL: "google/gemma-3-1b-it:free",
+    DEFAULT_LANGUAGE_DETECTOR_MODEL: "meta-llama/llama-4-scout:free", // Needs good JSON output
 
-  /** @type {string|null} */
-  let openRouterApiKey = await GM_getValue(API_KEY_STORAGE_KEY, null);
+    // Resource Limits & Ratios
+    MAX_CONTEXT_TOKENS: 128000, // Note: Specific model limits may be lower
+    TOKEN_CHAR_RATIO: 5, // Rough estimate
 
-  // --- API Key Management ---
+    // OpenRouter Request Headers
+    YOUR_SITE_URL: "about:blank", // Recommended: Replace with your specific site if applicable
+    YOUR_APP_NAME: "ChromeAI_API_Emulator_v3.1",
 
-  /**
-   * Prompts the user to enter their OpenRouter API key.
-   * Stores the key in Greasemonkey/Tampermonkey storage.
-   * @async
-   * @returns {Promise<string|null>} The API key if entered, otherwise null.
-   */
-  async function promptForApiKey() {
-    const key = prompt(
-      "Please enter your OpenRouter API Key (see https://openrouter.ai/keys):",
-      openRouterApiKey || "",
-    );
-    if (key) {
-      await GM_setValue(API_KEY_STORAGE_KEY, key);
-      openRouterApiKey = key;
-      alert(
-        "API Key saved. Please reload the page for the APIs to become available.",
-      );
-      return key;
-    }
-    return null;
-  }
+    // Storage & Namespace
+    API_KEY_STORAGE_KEY: "openrouter_api_key",
+    NAMESPACE_TARGET: unsafeWindow,
+    EMULATED_NAMESPACE: "ai",
+    PENDING_PROMISES_KEY: "_pendingAIPromises", // Key on NAMESPACE_TARGET for placeholder promises
 
-  /**
-   * Ensures that an OpenRouter API key is available.
-   * Prompts the user for the key if it's not already stored.
-   * @async
-   * @returns {Promise<string|null>} The API key, or null if the user cancels the prompt.
-   */
-  async function ensureApiKey() {
-    if (!openRouterApiKey) {
-      console.warn(
-        `${EMULATED_NAMESPACE}: OpenRouter API Key not found. Prompting user.`,
-      );
-      return await promptForApiKey();
-    }
-    return openRouterApiKey;
-  }
+    // --- System Prompt Templates ---
+    // Note: {placeholder} syntax used for replacement.
+    SHARED_CONTEXT_TEMPLATE: `\n\nShared Context:\n{sharedContext}`,
 
-  GM_registerMenuCommand("Set OpenRouter API Key", promptForApiKey);
-  GM_registerMenuCommand("Clear OpenRouter API Key", async () => {
-    await GM_deleteValue(API_KEY_STORAGE_KEY);
-    openRouterApiKey = null;
-    alert("API Key cleared. Please reload the page.");
+    // Summarizer uses {type}, {format}, {length}, {sharedContextSection}
+    SUMMARIZER_SYSTEM_PROMPT: `
+    You are an expert text summarizer. Generate a concise and accurate summary based ONLY on the provided text and instructions.
+    Instructions:
+    - Summary Type: {type}
+    - Output Format: {format}
+    - Desired Length: {length}{sharedContextSection}
+    Output ONLY the summary in the requested format and length. Do not add conversational filler or explanations.${FORCE_COMPLETION_SUFFIX}`.trim(),
+
+    // Writer uses {tone}, {length}, {sharedContextSection}
+    WRITER_SYSTEM_PROMPT: `
+    You are a versatile writing assistant. Generate new text based ONLY on the provided writing task prompt and instructions.
+    Instructions:
+    - Tone: {tone}
+    - Desired Length: {length}{sharedContextSection}
+    Output ONLY the requested text, adhering strictly to the specified tone and length. Do not add conversational filler unless the task explicitly asks for it.${FORCE_COMPLETION_SUFFIX}`.trim(),
+
+    // Rewriter uses {instructionsSection}, {sharedContextSection}, {tone}, {length} (tone/length passed to prompt for consistency, not core rewrite params)
+    REWRITER_SYSTEM_PROMPT: `
+    You are an expert text rewriter. Transform and rephrase the input text based ONLY on the provided instructions.
+    Task Instructions:
+    {instructionsSection}{sharedContextSection}
+    - Tone (Guideline): {tone}
+    - Length (Guideline): {length}
+    Output ONLY the rewritten text, adhering strictly to the transformation requested. Do not add conversational filler.${FORCE_COMPLETION_SUFFIX}`.trim(),
+
+    // Translator uses {sourceLanguage}, {targetLanguage}
+    TRANSLATOR_SYSTEM_PROMPT: `
+    You are a text translator. Translate the user's input text accurately from the source language to the target language.
+    Source Language (BCP 47): {sourceLanguage}
+    Target Language (BCP 47): {targetLanguage}
+    Output ONLY the translated text in the target language. Do not add any extra information, explanations, greetings, or apologies.${FORCE_COMPLETION_SUFFIX}`.trim(),
+
+    // Language Detector: System prompt instructs model on JSON output format.
+    LANGUAGE_DETECTOR_SYSTEM_PROMPT: `
+    You are a language detection assistant. Analyze the user's input text and identify the language(s) present.
+    Your response MUST be a valid JSON array of objects, sorted by confidence descending. Each object must have:
+    { "detectedLanguage": "BCP 47 code (e.g., 'en', 'fr', 'zh-Hans')", "confidence": number (0.0-1.0) }
+    If detection fails or text is ambiguous, return ONLY: [{"detectedLanguage": "und", "confidence": 1.0}].
+    Do NOT include any text outside the single JSON array response.${FORCE_COMPLETION_SUFFIX}`.trim(),
   });
 
-  // --- Core API Interaction Logic ---
+  // --- State Variables ---
+  let openRouterApiKey = null; // Loaded during init
 
-  /**
-   * Parses Server-Sent Events (SSE) data to extract content chunks.
-   * @param {string} sseData - The raw SSE data string.
-   * @returns {string[]} An array of content chunks extracted from the SSE data.
-   */
-  function parseSSE(sseData) {
-    const lines = sseData.trim().split("\n");
-    const chunks = [];
-    for (const line of lines) {
-      if (line.startsWith("data: ")) {
-        const dataContent = line.substring(6).trim();
-        if (dataContent === "[DONE]") {
-          break;
-        }
-        try {
-          const json = JSON.parse(dataContent);
+  // --- Simple Logger ---
+  const Logger = {
+    log: (message, ...args) =>
+      console.log(`[${Config.EMULATED_NAMESPACE}] ${message}`, ...args),
+    warn: (message, ...args) =>
+      console.warn(`[${Config.EMULATED_NAMESPACE}] ${message}`, ...args),
+    error: (message, ...args) =>
+      console.error(`[${Config.EMULATED_NAMESPACE}] ${message}`, ...args),
+    /** Logs the prompt being sent to the API */
+    logPrompt: (apiName, messages) => {
+      console.groupCollapsed(
+        `[${Config.EMULATED_NAMESPACE}] API Call: ${apiName} - Prompt Details`,
+      );
+      console.log("Messages:", messages);
+      console.groupEnd();
+    },
+  };
+
+  // --- Custom Error Classes ---
+
+  /** Mimics DOMException('QuotaExceededError') with added details. */
+  class QuotaExceededError extends DOMException {
+    /**
+     * @param {string} message - Error message.
+     * @param {object} details - Additional properties.
+     * @param {number} details.requested - The number of units requested (e.g., tokens).
+     * @param {number} details.quota - The maximum number of units allowed.
+     */
+    constructor(message, { requested, quota }) {
+      super(message, "QuotaExceededError");
+      this.requested = requested;
+      this.quota = quota;
+    }
+  }
+
+  /** Generic error for API-related issues. */
+  class APIError extends Error {
+    /**
+     * @param {string} message - Error message.
+     * @param {object} [options] - Optional details.
+     * @param {number} [options.status] - HTTP status code, if applicable.
+     * @param {Error} [options.cause] - Original error, if any.
+     */
+    constructor(message, options) {
+      super(message, options);
+      this.name = "APIError";
+      if (options?.status) this.status = options.status;
+    }
+  }
+
+  // --- Utility Functions ---
+  const Utils = {
+    /** Checks for CSP blockage using fetch and SecurityPolicyViolationEvent. @async */
+    isBlocked: async function (domain, timeout = 500) {
+      const normalizedDomain = domain
+        .replace(/^(https?:\/\/)?/, "")
+        .split("/")[0];
+      const testUrl = `https://${normalizedDomain}/`;
+      return new Promise((resolve) => {
+        let violationDetected = false;
+        let timerId = null;
+        const listener = (event) => {
           if (
-            json.choices &&
-            json.choices[0] &&
-            json.choices[0].delta &&
-            json.choices[0].delta.content
+            event.blockedURI.includes(normalizedDomain) &&
+            (event.violatedDirective.startsWith("connect-src") ||
+              event.violatedDirective.startsWith("default-src"))
           ) {
-            chunks.push(json.choices[0].delta.content);
+            violationDetected = true;
+            clearTimeout(timerId);
+            document.removeEventListener("securitypolicyviolation", listener);
+            resolve(true);
           }
-        } catch (e) {
-          console.error(
-            `${EMULATED_NAMESPACE}: Error parsing SSE chunk:`,
-            dataContent,
-            e,
+        };
+        document.addEventListener("securitypolicyviolation", listener);
+        fetch(testUrl, { method: "HEAD", mode: "no-cors", cache: "no-store" })
+          .then((response) => {
+            // Logger.log(`CSP Check: Fetch attempt to ${testUrl} allowed (status: ${response.status}).`);
+          })
+          .catch((error) => {
+            // Rely primarily on the event
+          });
+        timerId = setTimeout(() => {
+          if (!violationDetected) {
+            document.removeEventListener("securitypolicyviolation", listener);
+            resolve(false);
+          }
+        }, timeout);
+      });
+    },
+
+    /** Estimates token count (simple char-based). */
+    tokenize: (text) =>
+      text ? Math.ceil(text.length / Config.TOKEN_CHAR_RATIO) : 0,
+
+    /** Calculates total tokens for an array of messages. */
+    calculateTotalTokens: (messages) =>
+      messages.reduce((sum, msg) => sum + Utils.tokenize(msg.content), 0),
+
+    /** Formats shared context string. */
+    formatSharedContext: (sharedContext) =>
+      sharedContext?.trim()
+        ? Config.SHARED_CONTEXT_TEMPLATE.replace(
+            "{sharedContext}",
+            sharedContext.trim(),
+          )
+        : "",
+
+    /** Parses Server-Sent Events (SSE) data string into content chunks. */
+    parseSSE: (sseData) => {
+      const chunks = [];
+      const lines = sseData.trim().split("\n");
+      for (const line of lines) {
+        if (line.startsWith("data:")) {
+          const dataContent = line.substring(5).trim();
+          if (dataContent === "[DONE]") break;
+          try {
+            const json = JSON.parse(dataContent);
+            const delta = json?.choices?.[0]?.delta?.content;
+            if (delta) chunks.push(delta);
+          } catch (e) {
+            Logger.error(`Error parsing SSE chunk:`, dataContent, e);
+          }
+        }
+      }
+      return chunks;
+    },
+
+    /** Helper to create a ReadableStream for streaming API operations. */
+    createApiReadableStream: ({
+      apiName,
+      apiKey,
+      model,
+      messages,
+      parameters,
+      signal,
+      accumulated = false,
+      onSuccess,
+    }) => {
+      if (signal?.aborted) {
+        const abortError = new DOMException(
+          "Operation aborted before stream start.",
+          "AbortError",
+          { cause: signal.reason },
+        );
+        return new ReadableStream({
+          start(controller) {
+            controller.error(abortError);
+          },
+        });
+      }
+
+      let streamController;
+      let requestAbortedOrFinished = false;
+
+      const stream = new ReadableStream({
+        start: async (controller) => {
+          streamController = controller;
+
+          // 1. Check Quota
+          const totalTokens = Utils.calculateTotalTokens(messages);
+          if (totalTokens > Config.MAX_CONTEXT_TOKENS) {
+            const error = new QuotaExceededError(
+              `${Config.EMULATED_NAMESPACE}.${apiName}: Input exceeds maximum token limit.`,
+              { requested: totalTokens, quota: Config.MAX_CONTEXT_TOKENS },
+            );
+            Logger.error(
+              error.message,
+              `Requested: ${totalTokens}, Quota: ${Config.MAX_CONTEXT_TOKENS}`,
+            );
+            requestAbortedOrFinished = true;
+            streamController.error(error);
+            return;
+          }
+
+          // 2. Call API
+          try {
+            await CoreAPI.askOpenRouter({
+              apiName, // Pass apiName for logging
+              apiKey,
+              messages,
+              model,
+              parameters,
+              stream: true,
+              signal,
+              on: {
+                chunk: (delta, acc) => {
+                  if (requestAbortedOrFinished || !streamController) return;
+                  try {
+                    // Enqueue accumulated text or just the delta based on 'accumulated' flag
+                    streamController.enqueue(accumulated ? acc : delta);
+                  } catch (e) {
+                    Logger.error(`${apiName}: Error enqueuing chunk:`, e);
+                    requestAbortedOrFinished = true;
+                    try {
+                      streamController.error(e);
+                    } catch (_) {}
+                  }
+                },
+                finish: (/* fullMessage */) => {
+                  if (requestAbortedOrFinished || !streamController) return;
+                  requestAbortedOrFinished = true;
+                  Logger.log(`${apiName}: Streaming finished.`);
+                  try {
+                    streamController.close();
+                    onSuccess?.();
+                  } catch (_) {
+                    /* Might already be closed/errored */
+                  }
+                },
+                error: (error) => {
+                  if (requestAbortedOrFinished || !streamController) return;
+                  requestAbortedOrFinished = true;
+                  Logger.error(`${apiName}: Streaming error received:`, error);
+                  try {
+                    streamController.error(error);
+                  } catch (_) {}
+                },
+              },
+            });
+          } catch (error) {
+            if (!requestAbortedOrFinished && streamController) {
+              requestAbortedOrFinished = true;
+              Logger.error(
+                `${apiName}: Error during streaming setup/request:`,
+                error,
+              );
+              try {
+                streamController.error(error);
+              } catch (_) {}
+            } else if (!streamController) {
+              Logger.error(
+                `${apiName}: Stream controller unavailable during error:`,
+                error,
+              );
+            }
+          }
+        },
+        cancel: (reason) => {
+          Logger.log(
+            `${apiName}: Stream cancelled by consumer. Reason:`,
+            reason,
+          );
+          requestAbortedOrFinished = true;
+        },
+      });
+      return stream;
+    },
+
+    /** Simulates the download progress events for the monitor callback. */
+    simulateMonitorEvents: (monitorCallback) => {
+      if (typeof monitorCallback !== "function") return;
+      try {
+        const monitorTarget = {
+          addEventListener: (type, listener) => {
+            if (type === "downloadprogress" && typeof listener === "function") {
+              setTimeout(
+                () =>
+                  listener(
+                    new ProgressEvent("downloadprogress", {
+                      loaded: 0,
+                      total: 1,
+                    }),
+                  ),
+                5,
+              );
+              setTimeout(
+                () =>
+                  listener(
+                    new ProgressEvent("downloadprogress", {
+                      loaded: 1,
+                      total: 1,
+                    }),
+                  ),
+                10,
+              );
+            }
+          },
+        };
+        monitorCallback(monitorTarget);
+      } catch (e) {
+        Logger.error(`Error calling monitor function:`, e);
+      }
+    },
+  };
+
+  let _fetch = window.fetch;
+  Utils.isBlocked(new URL(Config.OPENROUTER_API_BASE_URL).hostname).then(
+    (blocked) => {
+      if (blocked) {
+        if (typeof GM_fetch === "function") {
+          Logger.log(`Using GM_fetch due to potential CSP.`);
+          _fetch = GM_fetch;
+        } else {
+          Logger.warn(
+            `GM_fetch not found, using window.fetch despite potential CSP issues.`,
           );
         }
       }
-    }
-    return chunks;
-  }
+    },
+  );
 
-  /**
-   * Unified function to handle OpenRouter API requests with streaming and non-streaming modes.
-   * @async
-   * @param {object} params - Parameters for the API request.
-   * @param {string} params.apiKey - The OpenRouter API key.
-   * @param {AILanguageModelMessage[]} params.messages - The message history/prompt.
-   * @param {string} [params.model] - The model to use. Defaults to DEFAULT_MODEL.
-   * @param {object} [params.parameters] - Model parameters.
-   * @param {number} [params.parameters.temperature] - Temperature for response generation.
-   * @param {number} [params.parameters.topK] - Top-k parameter.
-   * @param {boolean} [params.stream=false] - Whether to use streaming mode.
-   * @param {AbortSignal} [params.signal] - Abort signal for the request.
-   * @param {object} params.on - Event handlers for streaming/completion.
-   * @param {function(string): void} [params.on.chunk] - Callback for each chunk delta in streaming mode. Parameter is delta.
-   * @param {function(string): void} [params.on.finish] - Callback when the stream finishes or for non-streaming response. Parameter is full message.
-   * @param {function(Error): void} [params.on.error] - Callback for errors. Parameter is error object.
-   * @returns {Promise<string>} - Promise that resolves with the full response content.
-   * @throws {Error} If OpenRouter API Key is not configured or API returns an error.
-   * @throws {DOMException} If the operation is aborted.
-   */
-  async function askOpenRouter({
-    apiKey,
-    messages,
-    model = DEFAULT_MODEL,
-    parameters,
-    stream = false,
-    signal,
-    on,
-  }) {
-    if (!apiKey) {
-      const error = new Error(
-        `${EMULATED_NAMESPACE}: OpenRouter API Key is not configured.`,
-      );
-      on.error?.(error);
-      return Promise.reject(error);
-    }
-
-    if (signal?.aborted) {
-      const error = new DOMException("Operation aborted.", "AbortError");
-      on.error?.(error);
-      return Promise.reject(error);
-    }
-
-    const requestBody = {
-      model: model,
-      messages: messages,
-      stream: stream === true,
-    };
-
-    if (parameters) {
-      if (parameters.temperature !== undefined)
-        requestBody.temperature = parameters.temperature;
-      if (parameters.topK !== undefined) requestBody.top_k = parameters.topK;
-      // Note: Chrome Prompt API options might not map 1:1. Add more mappings if needed.
-    }
-
-    const controller = new AbortController();
-    const actualSignal = signal
-      ? AbortSignal.any([signal, controller.signal])
-      : controller.signal;
-
-    // Add listener to propagate abort reason if original signal aborts
-    let abortReason = null;
-    const abortHandler = (event) => {
-      abortReason =
-        event?.reason ?? new DOMException("Operation aborted.", "AbortError");
-      controller.abort(abortReason); // Propagate abort to the fetch request
-    };
-    signal?.addEventListener("abort", abortHandler, { once: true });
-
-    return new Promise(async (resolve, reject) => {
-      let accumulatedResponse = "";
-
-      const requestOptions = {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": YOUR_SITE_URL,
-          "X-Title": YOUR_APP_NAME,
-        },
-        body: JSON.stringify(requestBody),
-        signal: actualSignal,
-      };
-
-      if (stream) {
-        requestOptions.headers.Accept = "text/event-stream";
+  // --- Core API Interaction Logic ---
+  const CoreAPI = {
+    /** Central function to make requests to OpenRouter. */
+    askOpenRouter: async ({
+      apiName, // Added for logging
+      apiKey,
+      messages,
+      model,
+      parameters,
+      stream = false,
+      signal,
+      on,
+    }) => {
+      if (!apiKey) {
+        const error = new APIError(`OpenRouter API Key is not configured.`);
+        on?.error?.(error);
+        return Promise.reject(error);
+      }
+      if (signal?.aborted) {
+        const error = new DOMException(
+          "Operation aborted before request.",
+          "AbortError",
+          { cause: signal.reason },
+        );
+        on?.error?.(error);
+        return Promise.reject(error);
       }
 
-      try {
-        const response = await fetch(
-          "https://openrouter.ai/api/v1/chat/completions",
-          requestOptions,
-        );
+      const requestBody = { model, messages, stream };
+      if (parameters) {
+        if (parameters.temperature !== undefined)
+          requestBody.temperature = parameters.temperature;
+        if (parameters.topK !== undefined) requestBody.top_k = parameters.topK;
+      }
 
+      const internalController = new AbortController();
+      const combinedSignal = signal
+        ? AbortSignal.any([signal, internalController.signal])
+        : internalController.signal;
+      let abortReason = null;
+      const abortHandler = (event) => {
+        abortReason =
+          event?.reason ?? new DOMException("Operation aborted.", "AbortError");
+        if (!internalController.signal.aborted) {
+          internalController.abort(abortReason);
+        }
+      };
+      signal?.addEventListener("abort", abortHandler, { once: true });
+
+      // Log the prompt before fetching
+      Logger.logPrompt(apiName, messages);
+
+      return new Promise(async (resolve, reject) => {
+        let accumulatedResponse = "";
+        const requestOptions = {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": Config.YOUR_SITE_URL,
+            "X-Title": Config.YOUR_APP_NAME,
+            ...(stream && { Accept: "text/event-stream" }),
+          },
+          body: JSON.stringify(requestBody),
+          signal: combinedSignal,
+        };
+
+        try {
+          const response = await _fetch(
+            Config.OPENROUTER_CHAT_COMPLETIONS_URL,
+            requestOptions,
+          );
+
+          if (!response.ok) {
+            let errorText = `API Error ${response.status}`;
+            let errorDetail = "";
+            try {
+              const bodyText = await response.text();
+              errorText = `${errorText}: ${bodyText.substring(0, 150)}`;
+              try {
+                const jsonError = JSON.parse(bodyText);
+                errorDetail =
+                  jsonError?.error?.message || bodyText.substring(0, 100);
+              } catch {
+                errorDetail = bodyText.substring(0, 100);
+              }
+            } catch (_) {
+              /* Ignore body reading errors */
+            }
+            const error = new APIError(
+              `${apiName}: ${errorDetail || `OpenRouter request failed with status ${response.status}`}`,
+              { status: response.status },
+            );
+            on?.error?.(error);
+            reject(error);
+            return;
+          }
+
+          if (stream) {
+            if (!response.body)
+              throw new APIError("Response body is null for stream.");
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+
+            while (true) {
+              if (combinedSignal.aborted) {
+                const error =
+                  abortReason ??
+                  new DOMException(
+                    "Operation aborted during stream read.",
+                    "AbortError",
+                    { cause: combinedSignal.reason },
+                  );
+                on?.error?.(error);
+                reject(error);
+                try {
+                  await reader.cancel(error);
+                } catch (_) {}
+                break;
+              }
+
+              const { done, value } = await reader.read();
+
+              if (combinedSignal.aborted) {
+                const error =
+                  abortReason ??
+                  new DOMException(
+                    "Operation aborted during stream processing.",
+                    "AbortError",
+                    { cause: combinedSignal.reason },
+                  );
+                on?.error?.(error);
+                reject(error);
+                try {
+                  await reader.cancel(error);
+                } catch (_) {}
+                break;
+              }
+
+              if (done) {
+                if (buffer.trim())
+                  Logger.warn(`Remaining buffer at stream end:`, buffer);
+                on?.finish?.(accumulatedResponse);
+                resolve(accumulatedResponse);
+                break;
+              }
+
+              buffer += decoder.decode(value, { stream: true });
+              const eventMessages = buffer.split("\n\n");
+              buffer = eventMessages.pop() || "";
+
+              for (const sseMessage of eventMessages) {
+                if (sseMessage.trim()) {
+                  const deltas = Utils.parseSSE(sseMessage + "\n\n");
+                  deltas.forEach((delta) => {
+                    accumulatedResponse += delta;
+                    on?.chunk?.(delta, accumulatedResponse);
+                  });
+                }
+              }
+            }
+          } else {
+            const jsonResponse = await response.json();
+            const content = jsonResponse?.choices?.[0]?.message?.content;
+            if (typeof content === "string") {
+              accumulatedResponse = content;
+              on?.finish?.(content);
+              resolve(content);
+            } else {
+              Logger.error(
+                `Invalid non-streaming response structure:`,
+                jsonResponse,
+              );
+              throw new APIError(
+                `${apiName}: Invalid response structure from OpenRouter.`,
+              );
+            }
+          }
+        } catch (error) {
+          let finalError = error;
+          if (error.name === "AbortError" || combinedSignal.aborted) {
+            finalError =
+              abortReason ??
+              new DOMException("Operation aborted.", "AbortError", {
+                cause: combinedSignal.reason ?? error,
+              });
+          } else if (
+            !(error instanceof APIError || error instanceof QuotaExceededError)
+          ) {
+            Logger.error(`Unexpected error during API call:`, error);
+            finalError = new APIError(
+              `${apiName}: Network or processing error: ${error.message}`,
+              { cause: error },
+            );
+          }
+          on?.error?.(finalError);
+          reject(finalError);
+        } finally {
+          if (!internalController.signal.aborted) {
+            internalController.abort(
+              new DOMException("Operation finished or errored.", "AbortError"),
+            );
+          }
+          signal?.removeEventListener("abort", abortHandler);
+        }
+      });
+    },
+  };
+
+  // --- API Key Management ---
+  const KeyManager = {
+    promptForApiKey: async () => {
+      const currentKey =
+        openRouterApiKey ?? (await GM_getValue(Config.API_KEY_STORAGE_KEY, ""));
+      const newKey = prompt(
+        "Enter OpenRouter API Key (https://openrouter.ai/keys):",
+        currentKey,
+      );
+      if (newKey === null) {
+        alert("API Key entry cancelled.");
+      } else if (newKey === "" && currentKey !== "") {
+        await KeyManager.clearApiKey(false);
+      } else if (newKey !== "" && newKey !== currentKey) {
+        await GM_setValue(Config.API_KEY_STORAGE_KEY, newKey);
+        openRouterApiKey = newKey;
+        alert("API Key saved. Reload page to apply changes.");
+      }
+    },
+    clearApiKey: async (confirmFirst = true) => {
+      if (
+        !openRouterApiKey &&
+        !(await GM_getValue(Config.API_KEY_STORAGE_KEY))
+      ) {
+        alert("No API key stored.");
+        return;
+      }
+      const confirmed =
+        !confirmFirst || confirm("Clear stored OpenRouter API Key?");
+      if (confirmed) {
+        await GM_deleteValue(Config.API_KEY_STORAGE_KEY);
+        openRouterApiKey = null;
+        alert("API Key cleared. Reload page.");
+      }
+    },
+    ensureApiKeyLoaded: async () => {
+      if (!openRouterApiKey) {
+        openRouterApiKey = await GM_getValue(Config.API_KEY_STORAGE_KEY, null);
+      }
+      return openRouterApiKey;
+    },
+    getOpenRouterKeyDetails: async () => {
+      const apiKey = await KeyManager.ensureApiKeyLoaded();
+      if (!apiKey) {
+        alert("OpenRouter API Key needed. Set via menu.");
+        return null;
+      }
+      try {
+        const response = await _fetch(Config.OPENROUTER_KEY_CHECK_URL, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "HTTP-Referer": Config.YOUR_SITE_URL,
+            "X-Title": Config.YOUR_APP_NAME,
+          },
+        });
         if (!response.ok) {
           const errorText = await response.text();
-          console.error(
-            `${EMULATED_NAMESPACE}: API error ${response.status}:`,
-            errorText,
+          alert(
+            `Error fetching key details (${response.status}): ${errorText.substring(0, 200)}`,
           );
-          const error = new Error(
-            `${EMULATED_NAMESPACE}: OpenRouter API Error (${response.status}) - ${response.statusText}. Check console for details. Body: ${errorText.substring(0, 200)}`,
-          );
-          on.error?.(error);
-          reject(error);
-          return;
+          Logger.error(`API key check failed ${response.status}:`, errorText);
+          return null;
         }
-
-        if (stream) {
-          const reader = response.body.getReader();
-          const decoder = new TextDecoder();
-
-          while (true) {
-            if (actualSignal.aborted) {
-              // Check before and after read()
-              const error =
-                abortReason ||
-                new DOMException(
-                  "Operation aborted during stream.",
-                  "AbortError",
-                );
-              on.error?.(error);
-              reject(error);
-              reader.cancel(error); // Cancel the reader
-              break;
-            }
-
-            const { done, value } = await reader.read();
-
-            if (actualSignal.aborted) {
-              const error =
-                abortReason ||
-                new DOMException(
-                  "Operation aborted during stream.",
-                  "AbortError",
-                );
-              on.error?.(error);
-              reject(error);
-              reader.cancel(error);
-              break;
-            }
-
-            if (done) {
-              on.finish?.(accumulatedResponse);
-              resolve(accumulatedResponse);
-              break;
-            }
-
-            const chunkText = decoder.decode(value, { stream: true }); // Use stream: true
-            const chunks = parseSSE(chunkText);
-            chunks.forEach((delta) => {
-              if (delta) {
-                accumulatedResponse += delta;
-                on.chunk?.(delta); // Only pass the delta
-              }
-            });
-          }
-        } else {
-          // Non-streaming
-          const jsonResponse = await response.json();
-          if (jsonResponse?.choices?.[0]?.message?.content) {
-            const content = jsonResponse.choices[0].message.content;
-            on.finish?.(content);
-            resolve(content);
-          } else {
-            console.error(
-              `${EMULATED_NAMESPACE}: Invalid non-streaming response structure:`,
-              jsonResponse,
-            );
-            const error = new Error(
-              `${EMULATED_NAMESPACE}: Invalid response structure from OpenRouter.`,
-            );
-            on.error?.(error);
-            reject(error);
-          }
-        }
+        const data = await response.json();
+        return data?.data;
       } catch (error) {
-        // Handle fetch errors (network, abort, etc.)
-        let finalError;
-        if (error.name === "AbortError" || actualSignal.aborted) {
-          finalError =
-            abortReason || new DOMException("Operation aborted.", "AbortError");
+        alert(`Network error fetching key details: ${error.message}`);
+        Logger.error(`Network error during key check:`, error);
+        return null;
+      }
+    },
+    showKeyStatus: async () => {
+      const details = await KeyManager.getOpenRouterKeyDetails();
+      if (details) {
+        const formatCurrency = (val) =>
+          val !== undefined && val !== null
+            ? `$${Number(val).toFixed(4)}`
+            : "N/A";
+        const usage = formatCurrency(details.usage);
+        const limit = formatCurrency(details.limit);
+        const remaining = formatCurrency(details.limit_remaining);
+        const reqLimit = details.rate_limit?.requests ?? "N/A";
+        const interval = details.rate_limit?.interval ?? "N/A";
+        alert(
+          `OpenRouter Key:\nLabel: ${details.label || "N/A"}\nUsage: ${usage}\nLimit: ${limit}\nRemaining: ${remaining}\nRate: ${reqLimit} req / ${interval}\nFree Tier: ${details.is_free_tier ? "Yes" : "No"}`,
+        );
+      }
+    },
+  };
+
+  // --- API Implementation Helpers ---
+
+  class BaseApiInstance {
+    _apiKey;
+    _model;
+    _options;
+    _instanceAbortController;
+    _creationSignal;
+    _combinedSignal;
+    _apiName;
+    constructor(apiName, apiKey, defaultModel, options = {}) {
+      this._apiName = apiName;
+      this._apiKey = apiKey;
+      this._model = defaultModel;
+      this._options = { ...options };
+      this._creationSignal = options.signal;
+      this._instanceAbortController = new AbortController();
+      this._combinedSignal = options.signal
+        ? AbortSignal.any([
+            options.signal,
+            this._instanceAbortController.signal,
+          ])
+        : this._instanceAbortController.signal;
+      Utils.simulateMonitorEvents(options.monitor);
+      if (options.expectedContextLanguages || options.outputLanguage) {
+        Logger.warn(
+          `${apiName}: Language options (expectedContextLanguages, outputLanguage) are ignored by this emulator.`,
+        );
+      }
+    }
+    get inputQuota() {
+      return Config.MAX_CONTEXT_TOKENS;
+    }
+    async measureInputUsage(text) {
+      return Promise.resolve(Utils.tokenize(text));
+    }
+    destroy() {
+      Logger.log(`${this._apiName}: Instance destroy() called.`);
+      if (!this._instanceAbortController.signal.aborted) {
+        this._instanceAbortController.abort(
+          new DOMException(
+            `${this._apiName} instance destroyed.`,
+            "AbortError",
+          ),
+        );
+      }
+    }
+    async _performApiRequest({ messages, callOptions = {}, parameters = {} }) {
+      const operationSignal = callOptions.signal
+        ? AbortSignal.any([this._combinedSignal, callOptions.signal])
+        : this._combinedSignal;
+      if (operationSignal.aborted) {
+        throw (
+          operationSignal.reason ??
+          new DOMException(
+            `${this._apiName} operation aborted before start.`,
+            "AbortError",
+            { cause: operationSignal.reason },
+          )
+        );
+      }
+      const totalTokens = Utils.calculateTotalTokens(messages);
+      if (totalTokens > this.inputQuota) {
+        throw new QuotaExceededError(
+          `${this._apiName}: Input exceeds token limit.`,
+          { requested: totalTokens, quota: this.inputQuota },
+        );
+      }
+      try {
+        let requestError = null;
+        const result = await CoreAPI.askOpenRouter({
+          apiName: this._apiName,
+          apiKey: this._apiKey,
+          messages,
+          model: this._model,
+          parameters,
+          stream: false,
+          signal: operationSignal,
+          on: {
+            finish: (msg) =>
+              Logger.log(`${this._apiName}: Non-streaming request finished.`),
+            error: (err) => {
+              Logger.error(
+                `${this._apiName}: Error during non-streaming request:`,
+                err,
+              );
+              requestError = err;
+            },
+          },
+        });
+        if (requestError) throw requestError;
+        return result;
+      } catch (error) {
+        if (error.name === "AbortError" || operationSignal.aborted) {
+          throw operationSignal.reason ?? error;
+        }
+        if (error instanceof QuotaExceededError || error instanceof APIError) {
+          throw error;
+        }
+        Logger.error(
+          `${this._apiName}: Unexpected error performing API request:`,
+          error,
+        );
+        throw new APIError(
+          `${this._apiName}: Failed to complete operation. ${error.message}`,
+          { cause: error },
+        );
+      }
+    }
+    _performApiStreamingRequest({
+      messages,
+      callOptions = {},
+      parameters = {},
+      accumulated = false,
+      onSuccess,
+    }) {
+      const operationSignal = callOptions.signal
+        ? AbortSignal.any([this._combinedSignal, callOptions.signal])
+        : this._combinedSignal;
+      return Utils.createApiReadableStream({
+        apiName: this._apiName,
+        apiKey: this._apiKey,
+        model: this._model,
+        messages,
+        parameters,
+        signal: operationSignal,
+        accumulated,
+        onSuccess,
+      });
+    }
+  }
+
+  // --- API Implementations ---
+
+  class LanguageModelSession extends BaseApiInstance {
+    _history;
+    _parameters;
+    constructor(apiKey, options = {}) {
+      super("languageModel", apiKey, Config.DEFAULT_PROMPT_MODEL, options);
+      // Accept temperature, topK (as topP in the API), and systemPrompt directly from options
+      this._parameters = {
+        temperature:
+          options.temperature !== undefined
+            ? options.temperature
+            : Config.DEFAULT_TEMPERATURE,
+        topK: options.topK !== undefined ? options.topK : Config.DEFAULT_TOP_K,
+      };
+      // Temperature validation
+      if (this._parameters.temperature > Config.MAX_TEMPERATURE) {
+        Logger.warn(
+          `languageModel: temperature ${this._parameters.temperature} exceeds maximum of ${Config.MAX_TEMPERATURE}. Using maximum.`,
+        );
+        this._parameters.temperature = Config.MAX_TEMPERATURE;
+      }
+      // TopK validation
+      if (this._parameters.topK > Config.MAX_TOP_K) {
+        Logger.warn(
+          `languageModel: topK ${this._parameters.topK} exceeds maximum of ${Config.MAX_TOP_K}. Using maximum.`,
+        );
+        this._parameters.topK = Config.MAX_TOP_K;
+      }
+
+      this._history = this._initializeHistory(options);
+      if (this._combinedSignal.aborted) {
+        this.destroy();
+        throw (
+          this._creationSignal?.reason ??
+          new DOMException("languageModel creation aborted.", "AbortError", {
+            cause: this._creationSignal?.reason,
+          })
+        );
+      }
+    }
+    _initializeHistory(options) {
+      const history = [];
+      const initial = options.initialPrompts;
+      if (
+        initial &&
+        (!Array.isArray(initial) ||
+          initial.some((p) => typeof p !== "object" || !p.role || !p.content))
+      ) {
+        throw new TypeError("Invalid initialPrompts format.");
+      }
+      const systemInInitial = initial?.find((p) => p.role === "system");
+      if (options.systemPrompt && systemInInitial) {
+        throw new TypeError(
+          "Cannot provide both systemPrompt option and system role in initialPrompts.",
+        );
+      }
+      if (systemInInitial && initial[0].role !== "system") {
+        throw new TypeError(
+          "System role message must be first in initialPrompts.",
+        );
+      }
+      if (options.systemPrompt) {
+        history.push({ role: "system", content: options.systemPrompt });
+      }
+      if (initial) {
+        history.push(...initial);
+      }
+      return history;
+    }
+    _parseInput(input) {
+      if (typeof input === "string") return [{ role: "user", content: input }];
+      if (Array.isArray(input)) {
+        if (
+          input.some(
+            (msg) => typeof msg !== "object" || !msg.role || !msg.content,
+          )
+        ) {
+          throw new TypeError("Input message array needs {role, content}.");
+        }
+        return input;
+      }
+      throw new TypeError("Input must be string or message array.");
+    }
+
+    // Helper method to prepare parameters for API requests, applying per-call options if provided
+    _prepareParameters(callOptions) {
+      // Start with session-level parameters
+      const parameters = { ...this._parameters };
+
+      // Apply per-call parameters if provided
+      if (callOptions.temperature !== undefined) {
+        parameters.temperature = callOptions.temperature;
+        // Validate temperature
+        if (parameters.temperature > Config.MAX_TEMPERATURE) {
+          Logger.warn(
+            `languageModel: temperature ${parameters.temperature} exceeds maximum of ${Config.MAX_TEMPERATURE}. Using maximum.`,
+          );
+          parameters.temperature = Config.MAX_TEMPERATURE;
+        }
+      }
+
+      if (callOptions.topK !== undefined) {
+        parameters.topK = callOptions.topK;
+        // Validate topK
+        if (parameters.topK > Config.MAX_TOP_K) {
+          Logger.warn(
+            `languageModel: topK ${parameters.topK} exceeds maximum of ${Config.MAX_TOP_K}. Using maximum.`,
+          );
+          parameters.topK = Config.MAX_TOP_K;
+        }
+      }
+
+      return parameters;
+    }
+
+    // Helper method to prepare messages array, considering system prompt in options
+    _prepareMessages(input, callOptions) {
+      const currentUserMessages = this._parseInput(input);
+      let messagesForApi = [...this._history];
+
+      // If a per-call systemPrompt is provided, insert it at the beginning (replacing any existing system prompt)
+      if (callOptions.systemPrompt !== undefined) {
+        // Remove any existing system message at the start of history or messages
+        if (messagesForApi.length > 0 && messagesForApi[0].role === "system") {
+          messagesForApi = messagesForApi.slice(1);
+        }
+
+        // Add the new system prompt
+        messagesForApi.unshift({
+          role: "system",
+          content: callOptions.systemPrompt,
+        });
+      }
+
+      // Add the user messages
+      messagesForApi.push(...currentUserMessages);
+
+      return { messagesForApi, currentUserMessages };
+    }
+    async prompt(input, callOptions = {}) {
+      const { messagesForApi, currentUserMessages } = this._prepareMessages(
+        input,
+        callOptions,
+      );
+      const parameters = this._prepareParameters(callOptions);
+
+      const assistantResponse = await this._performApiRequest({
+        messages: messagesForApi,
+        callOptions,
+        parameters,
+      });
+
+      this._history.push(...currentUserMessages, {
+        role: "assistant",
+        content: assistantResponse,
+      });
+      Logger.log(`languageModel: prompt history updated.`);
+      return assistantResponse;
+    }
+    promptStreaming(input, callOptions = {}) {
+      const { messagesForApi, currentUserMessages } = this._prepareMessages(
+        input,
+        callOptions,
+      );
+      const parameters = this._prepareParameters(callOptions);
+
+      let fullResponse = ""; // Needed for history update
+      return this._performApiStreamingRequest({
+        messages: messagesForApi,
+        callOptions,
+        parameters,
+        accumulated: true, // Changed to false to match the expected behavior of streaming deltas
+        onSuccess: () => {
+          // Spec is unclear how history is updated on streaming.
+          // Assuming update after stream completion IF we could capture fullResponse.
+          // This is a limitation in the current ReadableStream handling.
+          // Logger.warn(`languageModel: History update for promptStreaming is currently approximate.`);
+          // This._history.push(...currentUserMessages, { role: "assistant", content: "<STREAMED_RESPONSE_PLACEHOLDER>" });
+
+          // For now, only log the user messages added before the stream started
+          this._history.push(...currentUserMessages);
+          Logger.log(
+            `languageModel: promptStreaming user history updated. Assistant response not added.`,
+          );
+        },
+      });
+    }
+    // Implementation for countPromptTokens
+    async countPromptTokens(prompt) {
+      try {
+        const messagesToCount = this._parseInput(prompt);
+        const tokenCount = Utils.calculateTotalTokens(messagesToCount);
+        return Promise.resolve(tokenCount);
+      } catch (error) {
+        Logger.error("countPromptTokens error:", error);
+        // Re-throw or return an error indicator, depending on spec.
+        // Let's re-throw TypeErrors from parsing.
+        if (error instanceof TypeError) {
+          throw error;
+        }
+        // For other errors, maybe return -1 or throw a generic error?
+        // Throwing seems more appropriate.
+        throw new APIError(`Failed to count tokens: ${error.message}`, {
+          cause: error,
+        });
+      }
+    }
+  }
+
+  class SummarizerInstance extends BaseApiInstance {
+    _systemPrompt;
+    constructor(apiKey, options = {}) {
+      super("summarizer", apiKey, Config.DEFAULT_SUMMARIZER_MODEL, options);
+      const type = options.type ?? "key-points";
+      const format = options.format ?? "markdown"; // Summarizer uses format
+      const length = options.length ?? "medium";
+      const sharedContextSection = Utils.formatSharedContext(
+        options.sharedContext,
+      );
+      this._systemPrompt = Config.SUMMARIZER_SYSTEM_PROMPT.replace(
+        "{type}",
+        type,
+      )
+        .replace("{format}", format)
+        .replace("{length}", length)
+        .replace("{sharedContextSection}", sharedContextSection);
+      if (this._combinedSignal.aborted) {
+        this.destroy();
+        throw (
+          this._creationSignal?.reason ??
+          new DOMException("summarizer creation aborted.", "AbortError", {
+            cause: this._creationSignal?.reason,
+          })
+        );
+      }
+    }
+    async summarize(text, callOptions = {}) {
+      if (typeof text !== "string")
+        throw new TypeError("Input 'text' must be a string.");
+      let userPromptContent = `Summarize the text:\n\`\`\`\n${text}\n\`\`\``;
+      if (callOptions.context?.trim()) {
+        userPromptContent += `\n\nContext:\n${callOptions.context.trim()}`;
+      }
+      const messages = [
+        { role: "system", content: this._systemPrompt },
+        { role: "user", content: userPromptContent },
+      ];
+      return this._performApiRequest({ messages, callOptions });
+    }
+    summarizeStreaming(text, callOptions = {}) {
+      if (typeof text !== "string")
+        throw new TypeError("Input 'text' must be a string.");
+      let userPromptContent = `Summarize the text:\n\`\`\`\n${text}\n\`\`\``;
+      if (callOptions.context?.trim()) {
+        userPromptContent += `\n\nContext:\n${callOptions.context.trim()}`;
+      }
+      const messages = [
+        { role: "system", content: this._systemPrompt },
+        { role: "user", content: userPromptContent },
+      ];
+      // Summarizer streams deltas according to latest spec understanding
+      return this._performApiStreamingRequest({
+        messages,
+        callOptions,
+        accumulated: false,
+      });
+    }
+  }
+
+  class WriterInstance extends BaseApiInstance {
+    _systemPrompt;
+    constructor(apiKey, options = {}) {
+      // Writer spec options: tone, length, sharedContext
+      super("writer", apiKey, Config.DEFAULT_WRITER_MODEL, options);
+      const tone = options.tone ?? "neutral";
+      const length = options.length ?? "medium";
+      const sharedContextSection = Utils.formatSharedContext(
+        options.sharedContext,
+      );
+      // Note: Writer does NOT use 'format' like Summarizer
+      this._systemPrompt = Config.WRITER_SYSTEM_PROMPT.replace("{tone}", tone)
+        .replace("{length}", length)
+        .replace("{sharedContextSection}", sharedContextSection);
+      if (this._combinedSignal.aborted) {
+        this.destroy();
+        throw (
+          this._creationSignal?.reason ??
+          new DOMException("writer creation aborted.", "AbortError", {
+            cause: this._creationSignal?.reason,
+          })
+        );
+      }
+    }
+    async write(taskPrompt, callOptions = {}) {
+      if (typeof taskPrompt !== "string")
+        throw new TypeError("Input 'taskPrompt' must be string.");
+      let userPromptContent = `Writing Task:\n${taskPrompt}`;
+      if (callOptions.context?.trim()) {
+        userPromptContent += `\n\nContext:\n${callOptions.context.trim()}`;
+      }
+      const messages = [
+        { role: "system", content: this._systemPrompt },
+        { role: "user", content: userPromptContent },
+      ];
+      return this._performApiRequest({ messages, callOptions });
+    }
+    writeStreaming(taskPrompt, callOptions = {}) {
+      if (typeof taskPrompt !== "string")
+        throw new TypeError("Input 'taskPrompt' must be string.");
+      let userPromptContent = `Writing Task:\n${taskPrompt}`;
+      if (callOptions.context?.trim()) {
+        userPromptContent += `\n\nContext:\n${callOptions.context.trim()}`;
+      }
+      const messages = [
+        { role: "system", content: this._systemPrompt },
+        { role: "user", content: userPromptContent },
+      ];
+      // Writer spec implies streaming the full accumulated text
+      return this._performApiStreamingRequest({
+        messages,
+        callOptions,
+        accumulated: true,
+      });
+    }
+  }
+
+  class RewriterInstance extends BaseApiInstance {
+    constructor(apiKey, options = {}) {
+      // Rewriter spec options: sharedContext (at creation), instructions (at call time)
+      super("rewriter", apiKey, Config.DEFAULT_REWRITER_MODEL, options);
+      if (this._combinedSignal.aborted) {
+        this.destroy();
+        throw (
+          this._creationSignal?.reason ??
+          new DOMException("rewriter creation aborted.", "AbortError", {
+            cause: this._creationSignal?.reason,
+          })
+        );
+      }
+    }
+    _buildSystemPrompt(
+      instructions,
+      sharedCtx,
+      tone = "neutral",
+      length = "medium",
+    ) {
+      const sharedContextSection = Utils.formatSharedContext(sharedCtx);
+      let instructionsSection = "";
+      if (instructions?.trim()) {
+        instructionsSection = `Instructions:\n${instructions.trim()}`;
+      } else {
+        Logger.warn(`rewriter: Missing instructions for system prompt.`);
+        instructionsSection = "Instructions: Rewrite the text.";
+      }
+      // Tone/length aren't formal rewrite params but add to prompt for guidance
+      return Config.REWRITER_SYSTEM_PROMPT.replace(
+        "{instructionsSection}",
+        instructionsSection,
+      )
+        .replace("{sharedContextSection}", sharedContextSection)
+        .replace("{tone}", tone)
+        .replace("{length}", length);
+    }
+    async rewrite(text, callOptions) {
+      if (typeof text !== "string")
+        throw new TypeError("Input 'text' must be string.");
+      if (
+        !callOptions ||
+        typeof callOptions.instructions !== "string" ||
+        !callOptions.instructions.trim()
+      ) {
+        throw new TypeError(
+          "Rewriter requires 'instructions' string in options.",
+        );
+      }
+      // Note: Rewriter call options don't include tone/length per spec, using defaults for prompt guidance
+      const systemPrompt = this._buildSystemPrompt(
+        callOptions.instructions,
+        this._options.sharedContext,
+      );
+      let userPromptContent = `Original Text:\n\`\`\`\n${text}\n\`\`\``;
+      if (callOptions.context?.trim()) {
+        userPromptContent += `\n\nContext:\n${callOptions.context.trim()}`;
+      }
+      const messages = [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPromptContent },
+      ];
+      return this._performApiRequest({ messages, callOptions });
+    }
+    rewriteStreaming(text, callOptions) {
+      if (typeof text !== "string")
+        throw new TypeError("Input 'text' must be string.");
+      if (
+        !callOptions ||
+        typeof callOptions.instructions !== "string" ||
+        !callOptions.instructions.trim()
+      ) {
+        throw new TypeError(
+          "Rewriter requires 'instructions' string in options.",
+        );
+      }
+      const systemPrompt = this._buildSystemPrompt(
+        callOptions.instructions,
+        this._options.sharedContext,
+      );
+      let userPromptContent = `Original Text:\n\`\`\`\n${text}\n\`\`\``;
+      if (callOptions.context?.trim()) {
+        userPromptContent += `\n\nContext:\n${callOptions.context.trim()}`;
+      }
+      const messages = [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPromptContent },
+      ];
+      // Rewriter spec implies streaming the full accumulated text
+      return this._performApiStreamingRequest({
+        messages,
+        callOptions,
+        accumulated: true,
+      });
+    }
+  }
+
+  class TranslatorInstance extends BaseApiInstance {
+    _sourceLanguage;
+    _targetLanguage;
+    _systemPrompt;
+    constructor(apiKey, options = {}) {
+      if (
+        typeof options.sourceLanguage !== "string" ||
+        !options.sourceLanguage
+      ) {
+        throw new TypeError(`Missing/invalid 'sourceLanguage'.`);
+      }
+      if (
+        typeof options.targetLanguage !== "string" ||
+        !options.targetLanguage
+      ) {
+        throw new TypeError(`Missing/invalid 'targetLanguage'.`);
+      }
+      super("Translator", apiKey, Config.DEFAULT_TRANSLATOR_MODEL, options); // Use 'Translator' for logging clarity
+      this._sourceLanguage = options.sourceLanguage;
+      this._targetLanguage = options.targetLanguage;
+      this._systemPrompt = Config.TRANSLATOR_SYSTEM_PROMPT.replace(
+        "{sourceLanguage}",
+        this._sourceLanguage,
+      ).replace("{targetLanguage}", this._targetLanguage);
+      if (this._combinedSignal.aborted) {
+        this.destroy();
+        throw (
+          this._creationSignal?.reason ??
+          new DOMException("Translator creation aborted.", "AbortError", {
+            cause: this._creationSignal?.reason,
+          })
+        );
+      }
+    }
+    async translate(text, callOptions = {}) {
+      if (typeof text !== "string")
+        throw new TypeError("Input 'text' must be string.");
+      if (callOptions.context)
+        Logger.warn(`${this._apiName}.translate: 'context' option is ignored.`);
+      const messages = [
+        { role: "system", content: this._systemPrompt },
+        { role: "user", content: text },
+      ];
+      return this._performApiRequest({ messages, callOptions });
+    }
+    translateStreaming(text, callOptions = {}) {
+      if (typeof text !== "string")
+        throw new TypeError("Input 'text' must be string.");
+      if (callOptions.context)
+        Logger.warn(
+          `${this._apiName}.translateStreaming: 'context' option is ignored.`,
+        );
+      const messages = [
+        { role: "system", content: this._systemPrompt },
+        { role: "user", content: text },
+      ];
+      // Translator streams raw text deltas
+      return this._performApiStreamingRequest({
+        messages,
+        callOptions,
+        accumulated: false,
+      });
+    }
+  }
+
+  class LanguageDetectorInstance extends BaseApiInstance {
+    _expectedInputLanguages;
+    constructor(apiKey, options = {}) {
+      super(
+        "LanguageDetector",
+        apiKey,
+        Config.DEFAULT_LANGUAGE_DETECTOR_MODEL,
+        options,
+      ); // Use 'LanguageDetector' for logging clarity
+      this._expectedInputLanguages = options.expectedInputLanguages;
+      if (this._expectedInputLanguages) {
+        Logger.warn(
+          `${this._apiName}: 'expectedInputLanguages' option noted but not actively used by AI model in emulation.`,
+        );
+      }
+      if (this._combinedSignal.aborted) {
+        this.destroy();
+        throw (
+          this._creationSignal?.reason ??
+          new DOMException("LanguageDetector creation aborted.", "AbortError", {
+            cause: this._creationSignal?.reason,
+          })
+        );
+      }
+    }
+    async detect(text, callOptions = {}) {
+      if (typeof text !== "string")
+        throw new TypeError("Input 'text' must be string.");
+      if (callOptions.context)
+        Logger.warn(`${this._apiName}.detect: 'context' option is ignored.`);
+      const messages = [
+        { role: "system", content: Config.LANGUAGE_DETECTOR_SYSTEM_PROMPT },
+        { role: "user", content: text },
+      ];
+      const responseJsonString = await this._performApiRequest({
+        messages,
+        callOptions,
+      });
+      let results = [{ detectedLanguage: "und", confidence: 1.0 }];
+      try {
+        const cleanedJsonString = responseJsonString
+          .trim()
+          .replace(/^```json\s*|\s*```$/g, "");
+        const parsed = JSON.parse(cleanedJsonString);
+        if (
+          Array.isArray(parsed) &&
+          parsed.length > 0 &&
+          parsed.every(
+            (item) =>
+              typeof item === "object" &&
+              item !== null &&
+              typeof item.detectedLanguage === "string" &&
+              item.detectedLanguage &&
+              typeof item.confidence === "number" &&
+              item.confidence >= 0 &&
+              item.confidence <= 1,
+          )
+        ) {
+          results = parsed.sort((a, b) => b.confidence - a.confidence);
         } else {
-          console.error(`${EMULATED_NAMESPACE}: Network/Fetch error:`, error);
-          finalError = new Error(
-            `${EMULATED_NAMESPACE}: Network error calling OpenRouter: ${error.message}`,
+          Logger.warn(
+            `${this._apiName}: Model response not valid JSON array of results. Using fallback. Response:`,
+            responseJsonString,
           );
         }
-        on.error?.(finalError);
-        reject(finalError);
-      } finally {
-        controller.abort(); // Clean up internal controller
-        signal?.removeEventListener("abort", abortHandler); // Clean up listener
+      } catch (parseError) {
+        Logger.warn(
+          `${this._apiName}: Failed to parse model JSON response. Using fallback. Error:`,
+          parseError,
+          "Response:",
+          responseJsonString,
+        );
       }
-    });
+      return results;
+    }
   }
 
-  // --- Type Definitions ---
+  // --- Placeholder Setup ---
+  function setupPlaceholders() {
+    const nsTarget = Config.NAMESPACE_TARGET;
+    const nsName = Config.EMULATED_NAMESPACE;
 
-  /**
-   * Represents a message in the conversation.
-   * @typedef {object} AILanguageModelMessage
-   * @property {'user' | 'assistant' | 'system'} role - The role of the message sender.
-   * @property {string} content - The message content.
-   */
-
-  /**
-   * Options for creating a language model session (Prompt API).
-   * @typedef {object} AILanguageModelCreateOptions
-   * @property {string} [systemPrompt] - Sets the assistant's behavior.
-   * @property {AILanguageModelMessage[]} [initialPrompts] - Conversation history.
-   * @property {number} [temperature] - Controls randomness (0-1).
-   * @property {number} [topK] - Limits token consideration (integer). Maps to OpenRouter's top_k.
-   * @property {AbortSignal} [signal] - Allows session abortion.
-   */
-
-  /**
-   * Options for creating a summarizer instance (Summarizer API).
-   * @typedef {object} AISummarizerCreateOptions
-   * @property {string} [sharedContext] - Additional context for all summaries.
-   * @property {'key-points' | 'tl;dr' | 'teaser' | 'headline'} [type='key-points'] - Type of summary.
-   * @property {'markdown' | 'plain-text'} [format='markdown'] - Output format.
-   * @property {'short' | 'medium' | 'long'} [length='medium'] - Desired summary length.
-   * @property {AbortSignal} [signal] - Allows creation abortion.
-   * @property {function({ addEventListener: function(string, function) })} [monitor] - For download progress (ignored in emulation).
-   * @property {string[]} [expectedInputLanguages] - Ignored in emulation.
-   * @property {string[]} [expectedContextLanguages] - Ignored in emulation.
-   * @property {string} [outputLanguage] - Ignored in emulation.
-   */
-
-  /**
-   * Represents an active session with the language model (Prompt API).
-   * @typedef {object} LanguageModelSession
-   * @property {function(string): Promise<string>} prompt - Generates a non-streaming response.
-   * @property {function(string): ReadableStream<string>} promptStreaming - Generates a streaming response.
-   * @property {function(): void} destroy - Cleans up the session.
-   * @property {AbortController} _abortController - Internal abort controller for the session.
-   * @property {AILanguageModelMessage[]} _history - Internal conversation history.
-   * @property {AILanguageModelCreateOptions} _options - Internal session options.
-   */
-
-  /**
-   * Represents an active summarizer instance (Summarizer API).
-   * @typedef {object} SummarizerInstance
-   * @property {function(string, {context?: string, signal?: AbortSignal}=): Promise<string>} summarize - Generates a non-streaming summary.
-   * @property {function(string, {context?: string, signal?: AbortSignal}=): ReadableStream<string>} summarizeStreaming - Generates a streaming summary.
-   * @property {function(): void} destroy - Cleans up the instance.
-   * @property {AbortController} _abortController - Internal abort controller for the instance.
-   * @property {string} _systemPrompt - The system prompt constructed from options.
-   * @property {AISummarizerCreateOptions} _options - Internal instance options.
-   * @property {number} inputQuota - Dummy value for compatibility.
-   * @property {function(string): Promise<number>} measureInputUsage - Dummy function for compatibility.
-   */
-
-  // --- Prompt API Implementation ---
-
-  /**
-   * Creates a new language model session (Prompt API emulation).
-   * @async
-   * @param {string} apiKey - OpenRouter API key.
-   * @param {AILanguageModelCreateOptions} [options={}] - Session configuration.
-   * @returns {Promise<LanguageModelSession>}
-   * @throws {Error} If API key is missing.
-   * @throws {DOMException} If session creation is aborted.
-   * @throws {TypeError} If initialPrompts format is invalid.
-   */
-  async function createPromptSession(apiKey, options = {}) {
-    if (!apiKey) {
-      throw new Error(
-        `${EMULATED_NAMESPACE}.languageModel: Cannot create session, OpenRouter API Key is not configured.`,
-      );
+    if (!nsTarget[nsName]) {
+      nsTarget[nsName] = {};
+      Logger.log(`Created global namespace '${nsName}'`);
     }
+    const aiNamespace = nsTarget[nsName];
+    nsTarget[Config.PENDING_PROMISES_KEY] =
+      nsTarget[Config.PENDING_PROMISES_KEY] || {}; // Ensure pending promises object exists
 
-    const sessionAbortController = new AbortController();
-    // Combine external signal with internal session controller
-    const combinedSignal = options.signal
-      ? AbortSignal.any([options.signal, sessionAbortController.signal])
-      : sessionAbortController.signal;
-
-    // Early exit if already aborted
-    if (combinedSignal.aborted) {
-      throw (
-        options.signal?.reason ??
-        new DOMException("Session creation aborted.", "AbortError")
-      );
-    }
-
-    // Listen for external abort signal after creation starts
-    let creationAbortReason = null;
-    const externalAbortHandler = (event) => {
-      creationAbortReason =
-        event?.reason ??
-        new DOMException("Session creation aborted externally.", "AbortError");
-      console.log(
-        `${EMULATED_NAMESPACE}.languageModel: Session creation aborted externally.`,
-      );
-      sessionAbortController.abort(creationAbortReason); // Trigger internal abort
-    };
-    options.signal?.addEventListener("abort", externalAbortHandler, {
-      once: true,
-    });
-
-    const history = [];
-    if (options.systemPrompt) {
-      history.push({ role: "system", content: options.systemPrompt });
-    }
-    if (options.initialPrompts) {
-      if (
-        !Array.isArray(options.initialPrompts) ||
-        options.initialPrompts.some(
-          (p) => typeof p !== "object" || !p.role || !p.content,
-        )
-      ) {
-        const error = new TypeError(
-          `${EMULATED_NAMESPACE}.languageModel: Invalid initialPrompts format.`,
-        );
-        options.signal?.removeEventListener("abort", externalAbortHandler);
-        sessionAbortController.abort(error); // Abort if invalid options
-        throw error;
-      }
-      // Ensure system prompt (if any) is first and unique
-      const systemPrompts = options.initialPrompts.filter(
-        (p) => p.role === "system",
-      );
-      if (options.systemPrompt && systemPrompts.length > 0) {
-        const error = new TypeError(
-          `${EMULATED_NAMESPACE}.languageModel: Cannot provide both systemPrompt option and a system role in initialPrompts.`,
-        );
-        options.signal?.removeEventListener("abort", externalAbortHandler);
-        sessionAbortController.abort(error);
-        throw error;
-      }
-      if (systemPrompts.length > 1) {
-        const error = new TypeError(
-          `${EMULATED_NAMESPACE}.languageModel: Only one system role message is allowed in initialPrompts.`,
-        );
-        options.signal?.removeEventListener("abort", externalAbortHandler);
-        sessionAbortController.abort(error);
-        throw error;
-      }
-      if (
-        systemPrompts.length === 1 &&
-        options.initialPrompts[0].role !== "system"
-      ) {
-        const error = new TypeError(
-          `${EMULATED_NAMESPACE}.languageModel: System role message must be the first in initialPrompts.`,
-        );
-        options.signal?.removeEventListener("abort", externalAbortHandler);
-        sessionAbortController.abort(error);
-        throw error;
-      }
-      history.push(...options.initialPrompts);
-    }
-
-    // --- Session Object ---
-    const session = {
-      _history: history,
-      _options: {
-        // Store relevant options for askOpenRouter
-        temperature: options.temperature,
-        topK: options.topK,
-      },
-      _abortController: sessionAbortController,
-
-      /**
-       * Generates a non-streaming response (Prompt API).
-       * Updates the session history.
-       */
-      prompt: async function (text) {
-        if (typeof text !== "string")
-          throw new TypeError("Input 'text' must be a string.");
-        if (combinedSignal.aborted)
-          throw (
-            sessionAbortController.signal.reason ??
-            new DOMException("Operation aborted.", "AbortError")
-          );
-
-        const currentUserMessage = { role: "user", content: text };
-        const currentHistory = [...this._history, currentUserMessage]; // History for this call
-
-        try {
-          const assistantResponse = await askOpenRouter({
-            apiKey: apiKey,
-            messages: currentHistory,
-            parameters: this._options,
-            model: DEFAULT_MODEL, // Or allow model selection via options?
-            stream: false, // Non-streaming
-            signal: combinedSignal, // Use combined signal
-            on: {
-              finish: (fullMessage) => {
-                // Update history ONLY on successful completion
-                this._history.push(currentUserMessage);
-                this._history.push({
-                  role: "assistant",
-                  content: fullMessage,
-                });
-                console.log(
-                  `${EMULATED_NAMESPACE}.languageModel: prompt finished. History updated.`,
-                );
-              },
-              error: (err) => {
-                console.error(
-                  `${EMULATED_NAMESPACE}.languageModel: prompt Error:`,
-                  err,
-                );
-                // Don't update history on error
-              },
-            },
-          });
-          return assistantResponse;
-        } catch (error) {
-          // Rethrow error (already logged by askOpenRouter's on.error)
-          // Ensure it's the correct abort reason if applicable
-          if (error.name === "AbortError" || combinedSignal.aborted) {
-            throw sessionAbortController.signal.reason ?? error;
-          }
-          throw error;
-        }
-      },
-
-      /**
-       * Generates a streaming response (Prompt API).
-       * Updates the session history *after* the stream completes successfully.
-       */
-      promptStreaming: function (text) {
-        if (typeof text !== "string")
-          throw new TypeError("Input 'text' must be a string.");
-
-        // Check abort status *before* creating the stream
-        if (combinedSignal.aborted) {
-          const abortError =
-            sessionAbortController.signal.reason ??
-            new DOMException("Operation aborted.", "AbortError");
-          return new ReadableStream({
-            start(controller) {
-              controller.error(abortError);
-            },
-          });
-        }
-
-        const currentUserMessage = { role: "user", content: text };
-        const currentHistory = [...this._history, currentUserMessage]; // History for this call
-
-        let streamController;
-        let accumulatedResponse = "";
-        let requestAborted = false; // Flag to prevent actions after abort/error
-
-        const stream = new ReadableStream({
-          start: (controller) => {
-            streamController = controller;
-
-            askOpenRouter({
-              apiKey: apiKey,
-              messages: currentHistory,
-              parameters: this._options,
-              model: DEFAULT_MODEL,
-              stream: true,
-              signal: combinedSignal, // Pass the combined signal
-              on: {
-                chunk: (delta) => {
-                  if (requestAborted) return;
-                  try {
-                    // Note: The Prompt API spec returns strings, not Uint8Array
-                    // We are returning strings directly from askOpenRouter parsing.
-                    streamController.enqueue(delta);
-                    accumulatedResponse += delta;
-                  } catch (e) {
-                    console.error(
-                      `${EMULATED_NAMESPACE}.languageModel: Error enqueuing chunk:`,
-                      e,
-                    );
-                    requestAborted = true;
-                    // We might not be able to error the controller if it's already closed/errored
-                    try {
-                      streamController.error(e);
-                    } catch (_) {}
-                  }
-                },
-                finish: (fullMessage) => {
-                  if (requestAborted) return;
-                  // Update history ONLY on successful completion
-                  this._history.push(currentUserMessage);
-                  this._history.push({
-                    role: "assistant",
-                    content: fullMessage,
-                  }); // Use final message
-                  console.log(
-                    `${EMULATED_NAMESPACE}.languageModel: promptStreaming finished. History updated.`,
-                  );
-                  try {
-                    streamController.close();
-                  } catch (_) {} // Might already be closed
-                },
-                error: (error) => {
-                  if (requestAborted) return;
-                  requestAborted = true;
-                  console.error(
-                    `${EMULATED_NAMESPACE}.languageModel: promptStreaming Error:`,
-                    error,
-                  );
-                  // Don't update history on error
-                  try {
-                    // Pass the original error (could be AbortError with reason)
-                    streamController.error(error);
-                  } catch (_) {} // Might already be errored
-                },
-              },
-            }).catch((error) => {
-              // Catch errors from askOpenRouter promise itself (e.g., initial setup errors)
-              if (!requestAborted) {
-                requestAborted = true;
-                console.error(
-                  `${EMULATED_NAMESPACE}.languageModel: promptStreaming askOpenRouter catch:`,
-                  error,
-                );
-                try {
-                  streamController.error(error);
-                } catch (_) {}
-              }
-            });
-          },
-          cancel: (reason) => {
-            console.log(
-              `${EMULATED_NAMESPACE}.languageModel: Stream cancelled. Reason:`,
-              reason,
+    const createPlaceholder = (apiName, isStatic = false) => {
+      const placeholder = {
+        availability: async () =>
+          (await KeyManager.ensureApiKeyLoaded())
+            ? isStatic
+              ? "available"
+              : "downloadable"
+            : "unavailable",
+        capabilities: async () => ({
+          available: (await KeyManager.ensureApiKeyLoaded()) ? "readily" : "no",
+        }),
+        create: async (options = {}) => {
+          if (!(await KeyManager.ensureApiKeyLoaded())) {
+            throw new APIError(
+              `${apiName}: Cannot create, API Key not configured.`,
             );
-            requestAborted = true; // Prevent further actions
-            // We don't directly control the fetch abort here,
-            // it should be handled by the signal passed to askOpenRouter.
-            // If cancellation originates from the stream consumer without an AbortSignal,
-            // the fetch might continue, but we stop processing chunks/finish.
-          },
-        });
+          }
+          return new Promise((resolve, reject) => {
+            // Store resolver/rejecter for the real `create` to use later
+            nsTarget[Config.PENDING_PROMISES_KEY][apiName] = {
+              resolve,
+              reject,
+              options,
+            };
+          });
+        },
+      };
+      return placeholder;
+    };
 
-        return stream;
+    const apisToCreate = [
+      {
+        name: "languageModel",
+        lower: "languageModel",
+        isStatic: false,
+        enabled: Config.ENABLE_PROMPT_API,
       },
+      {
+        name: "summarizer",
+        lower: "summarizer",
+        isStatic: false,
+        enabled: Config.ENABLE_SUMMARIZER_API,
+      },
+      {
+        name: "writer",
+        lower: "writer",
+        isStatic: false,
+        enabled: Config.ENABLE_WRITER_API,
+      },
+      {
+        name: "rewriter",
+        lower: "rewriter",
+        isStatic: false,
+        enabled: Config.ENABLE_REWRITER_API,
+      },
+      {
+        name: "Translator",
+        lower: "translator",
+        isStatic: true,
+        enabled: Config.ENABLE_TRANSLATOR_API,
+      }, // Handle both cases
+      {
+        name: "LanguageDetector",
+        lower: "languageDetector",
+        isStatic: true,
+        enabled: Config.ENABLE_LANGUAGE_DETECTOR_API,
+      }, // Handle both cases
+    ];
 
-      /** Destroys the session, aborting ongoing requests */
-      destroy: function () {
-        console.log(
-          `${EMULATED_NAMESPACE}.languageModel: Session destroy called.`,
-        );
-        // Abort with a specific reason if not already aborted
-        if (!this._abortController.signal.aborted) {
-          this._abortController.abort(
-            new DOMException("Session destroyed.", "AbortError"),
-          );
+    apisToCreate.forEach(({ name, lower, isStatic, enabled }) => {
+      if (enabled) {
+        // Ensure placeholder exists for the primary name (potentially uppercase)
+        if (!aiNamespace[name]) {
+          aiNamespace[name] = createPlaceholder(name, isStatic);
         }
-        options.signal?.removeEventListener("abort", externalAbortHandler); // Clean up listener
-      },
-    };
-
-    // Final check for immediate abort after setup but before returning
-    if (combinedSignal.aborted) {
-      console.log(
-        `${EMULATED_NAMESPACE}.languageModel: Session aborted immediately after setup.`,
-      );
-      session.destroy(); // Ensure cleanup
-      throw (
-        sessionAbortController.signal.reason ??
-        new DOMException("Session creation aborted.", "AbortError")
-      );
-    }
-
-    // Clean up listener if creation succeeds
-    options.signal?.removeEventListener("abort", externalAbortHandler);
-
-    return session;
-  }
-
-  /** Creates the `languageModel` API object */
-  function createLanguageModelApiObject() {
-    const languageModelApi = {
-      /** Check model availability (depends on API key) */
-      capabilities: async function () {
-        const key = await ensureApiKey();
-        // Simplification: 'after-download' isn't relevant for API-based emulation.
-        return { available: key ? "readily" : "no" };
-      },
-
-      /** Create a new session */
-      create: async function (options = {}) {
-        const key = await ensureApiKey(); // Ensure key exists before creating
-        if (!key) {
-          throw new Error(
-            `${EMULATED_NAMESPACE}.languageModel: Cannot create session, OpenRouter API Key is not configured.`,
-          );
+        // Ensure placeholder exists for the lowercase name if different
+        if (name !== lower && !aiNamespace[lower]) {
+          aiNamespace[lower] = createPlaceholder(lower, isStatic); // Use lowercase name for tracking promises
         }
-        return createPromptSession(key, options);
-      },
-      // Note: The explainer mentions LanguageModel.params() but it's not in the Chrome 131 API reference.
-      // Omitting it for now based on the reference.
-    };
-    return languageModelApi;
-  }
-
-  // --- Summarizer API Implementation ---
-
-  /**
-   * Creates a new summarizer instance (Summarizer API emulation).
-   * @async
-   * @param {string} apiKey - OpenRouter API key.
-   * @param {AISummarizerCreateOptions} [options={}] - Instance configuration.
-   * @returns {Promise<SummarizerInstance>}
-   * @throws {Error} If API key is missing.
-   * @throws {DOMException} If instance creation is aborted.
-   */
-  async function createSummarizerInstance(apiKey, options = {}) {
-    if (!apiKey) {
-      throw new Error(
-        `${EMULATED_NAMESPACE}.summarizer: Cannot create instance, OpenRouter API Key is not configured.`,
-      );
-    }
-
-    const instanceAbortController = new AbortController();
-    const combinedSignal = options.signal
-      ? AbortSignal.any([options.signal, instanceAbortController.signal])
-      : instanceAbortController.signal;
-
-    if (combinedSignal.aborted) {
-      throw (
-        options.signal?.reason ??
-        new DOMException("Summarizer creation aborted.", "AbortError")
-      );
-    }
-
-    // Listen for external abort during creation
-    let creationAbortReason = null;
-    const externalAbortHandler = (event) => {
-      creationAbortReason =
-        event?.reason ??
-        new DOMException(
-          "Summarizer creation aborted externally.",
-          "AbortError",
-        );
-      console.log(
-        `${EMULATED_NAMESPACE}.summarizer: Creation aborted externally.`,
-      );
-      instanceAbortController.abort(creationAbortReason);
-    };
-    options.signal?.addEventListener("abort", externalAbortHandler, {
-      once: true,
+      }
     });
 
-    // --- Process Options & Build System Prompt ---
-    const type = options.type ?? "key-points";
-    const format = options.format ?? "markdown";
-    const length = options.length ?? "medium";
-    const sharedContext = options.sharedContext ?? "";
+    Logger.log(`Placeholders ensured.`);
+  }
 
-    let sharedContextSection = "";
-    if (sharedContext.trim()) {
-      sharedContextSection = `\n\nShared Context:\n${sharedContext.trim()}`;
-    }
+  // --- Main Initialization ---
+  async function initializeApis() {
+    await KeyManager.ensureApiKeyLoaded();
+    GM_registerMenuCommand(
+      "Set OpenRouter API Key",
+      KeyManager.promptForApiKey,
+    );
+    GM_registerMenuCommand("Clear OpenRouter API Key", KeyManager.clearApiKey);
+    GM_registerMenuCommand(
+      "Check OpenRouter Key Status",
+      KeyManager.showKeyStatus,
+    );
 
-    const systemPrompt = SUMMARIZER_SYSTEM_PROMPT_TEMPLATE.replaceAll(
-      "{type}",
-      type,
-    )
-      .replaceAll("{format}", format)
-      .replaceAll("{length}", length)
-      .replaceAll("{sharedContextSection}", sharedContextSection);
+    const nsTarget = Config.NAMESPACE_TARGET;
+    const nsName = Config.EMULATED_NAMESPACE;
+    const aiNamespace = nsTarget[nsName];
+    const pendingPromises = nsTarget[Config.PENDING_PROMISES_KEY] || {};
 
-    // --- Summarizer Instance Object ---
-    const summarizerInstance = {
-      _options: options, // Keep original options if needed later
-      _systemPrompt: systemPrompt,
-      _abortController: instanceAbortController,
-      inputQuota: Infinity, // Emulation doesn't enforce quota
-
-      measureInputUsage: tokenize,
-
-      /** Generate non-streaming summary */
-      summarize: async function (text, callOptions = {}) {
-        if (typeof text !== "string")
-          throw new TypeError("Input 'text' must be a string.");
-        const signal = callOptions.signal
-          ? AbortSignal.any([combinedSignal, callOptions.signal])
-          : combinedSignal;
-
-        if (signal.aborted) {
-          throw (
-            signal.reason ??
-            new DOMException("Summarization aborted.", "AbortError")
-          );
-        }
-
-        let userPromptContent = `Summarize the following text:\n\n\`\`\`\n${text}\n\`\`\``;
-        if (callOptions.context?.trim()) {
-          userPromptContent += `\n\nAdditional Context (for this summary only):\n${callOptions.context.trim()}`;
-        }
-
-        const messages = [
-          { role: "system", content: this._systemPrompt },
-          { role: "user", content: userPromptContent },
-        ];
-
-        try {
-          const summary = await askOpenRouter({
-            apiKey: apiKey,
-            messages: messages,
-            model: DEFAULT_SUMMARIZER_MODEL, // Use dedicated summarizer model
-            parameters: {}, // No specific temp/topK for summarizer API
-            stream: false,
-            signal: signal, // Pass combined signal for this specific call
-            on: {
-              finish: (msg) =>
-                console.log(
-                  `${EMULATED_NAMESPACE}.summarizer: summarize finished.`,
-                ),
-              error: (err) =>
-                console.error(
-                  `${EMULATED_NAMESPACE}.summarizer: summarize Error:`,
-                  err,
-                ),
-            },
-          });
-          return summary;
-        } catch (error) {
-          // Rethrow error, ensuring correct abort reason
-          if (error.name === "AbortError" || signal.aborted) {
-            throw signal.reason ?? error;
-          }
-          throw error;
-        }
-      },
-
-      /** Generate streaming summary */
-      summarizeStreaming: function (text, callOptions = {}) {
-        if (typeof text !== "string")
-          throw new TypeError("Input 'text' must be a string.");
-        const signal = callOptions.signal
-          ? AbortSignal.any([combinedSignal, callOptions.signal])
-          : combinedSignal;
-
-        if (signal.aborted) {
-          const abortError =
-            signal.reason ??
-            new DOMException("Summarization aborted.", "AbortError");
-          return new ReadableStream({
-            start(controller) {
-              controller.error(abortError);
-            },
-          });
-        }
-
-        let userPromptContent = `Summarize the following text:\n\n\`\`\`\n${text}\n\`\`\``;
-        if (callOptions.context?.trim()) {
-          userPromptContent += `\n\nAdditional Context (for this summary only):\n${callOptions.context.trim()}`;
-        }
-
-        const messages = [
-          { role: "system", content: this._systemPrompt },
-          { role: "user", content: userPromptContent },
-        ];
-
-        let streamController;
-        let requestAborted = false;
-
-        const stream = new ReadableStream({
-          start: (controller) => {
-            streamController = controller;
-            askOpenRouter({
-              apiKey: apiKey,
-              messages: messages,
-              model: DEFAULT_SUMMARIZER_MODEL,
-              parameters: {},
-              stream: true,
-              signal: signal, // Use the combined signal for this call
-              on: {
-                chunk: (delta) => {
-                  if (requestAborted) return;
-                  try {
-                    streamController.enqueue(delta);
-                  } catch (e) {
-                    console.error("Error enqueuing:", e);
-                    requestAborted = true;
-                    try {
-                      streamController.error(e);
-                    } catch (_) {}
-                  }
-                },
-                finish: (fullMsg) => {
-                  if (requestAborted) return;
-                  console.log(
-                    `${EMULATED_NAMESPACE}.summarizer: summarizeStreaming finished.`,
-                  );
-                  try {
-                    streamController.close();
-                  } catch (_) {}
-                },
-                error: (error) => {
-                  if (requestAborted) return;
-                  requestAborted = true;
-                  console.error(
-                    `${EMULATED_NAMESPACE}.summarizer: summarizeStreaming Error:`,
-                    error,
-                  );
-                  try {
-                    streamController.error(error);
-                  } catch (_) {}
-                },
-              },
-            }).catch((error) => {
-              if (!requestAborted) {
-                requestAborted = true;
-                console.error(
-                  `${EMULATED_NAMESPACE}.summarizer: summarizeStreaming askOpenRouter catch:`,
-                  error,
-                );
-                try {
-                  streamController.error(error);
-                } catch (_) {}
-              }
-            });
-          },
-          cancel: (reason) => {
-            console.log(
-              `${EMULATED_NAMESPACE}.summarizer: Stream cancelled. Reason:`,
-              reason,
+    const createApiStatic = (apiName, InstanceClass, isEnabled) => {
+      if (!isEnabled) return null;
+      return {
+        availability: async (options = {}) =>
+          (await KeyManager.ensureApiKeyLoaded()) ? "available" : "unavailable", // Simplified
+        capabilities: async () => ({
+          available: (await KeyManager.ensureApiKeyLoaded()) ? "readily" : "no",
+          defaultTemperature: Config.DEFAULT_TEMPERATURE,
+          defaultTopK: Config.DEFAULT_TOP_K,
+          maxTemperature: Config.MAX_TEMPERATURE,
+          maxTopK: Config.MAX_TOP_K,
+        }),
+        create: async (options = {}) => {
+          const key = await KeyManager.ensureApiKeyLoaded();
+          // Use apiName (which could be upper or lower) to find pending promise
+          const pending = pendingPromises[apiName];
+          if (!key) {
+            const error = new APIError(
+              `${apiName}: Cannot create, API Key not configured.`,
             );
-            requestAborted = true;
-            // Abort signal passed to askOpenRouter should handle fetch cancellation
-          },
-        });
-        return stream;
-      },
-
-      /** Destroy the summarizer instance */
-      destroy: function () {
-        console.log(
-          `${EMULATED_NAMESPACE}.summarizer: Instance destroy called.`,
-        );
-        if (!this._abortController.signal.aborted) {
-          this._abortController.abort(
-            new DOMException("Summarizer instance destroyed.", "AbortError"),
-          );
-        }
-        options.signal?.removeEventListener("abort", externalAbortHandler); // Clean up listener
-      },
+            pending?.reject?.(error);
+            if (pending) delete pendingPromises[apiName];
+            throw error;
+          }
+          try {
+            const instance = new InstanceClass(key, options);
+            pending?.resolve?.(instance);
+            return instance;
+          } catch (error) {
+            Logger.error(`${apiName}: Error during instance creation:`, error);
+            pending?.reject?.(error);
+            throw error; // Rethrow creation error
+          } finally {
+            if (pending && pendingPromises[apiName])
+              delete pendingPromises[apiName]; // Clean up processed promise
+          }
+        },
+      };
     };
 
-    // Final check for immediate abort
-    if (combinedSignal.aborted) {
-      console.log(
-        `${EMULATED_NAMESPACE}.summarizer: Instance aborted immediately after setup.`,
-      );
-      summarizerInstance.destroy();
-      throw (
-        instanceAbortController.signal.reason ??
-        new DOMException("Summarizer creation aborted.", "AbortError")
-      );
-    }
+    const createTranslatorApi = (apiName, InstanceClass, isEnabled) => {
+      if (!isEnabled) return null;
+      const baseApi = createApiStatic(apiName, InstanceClass, isEnabled);
 
-    options.signal?.removeEventListener("abort", externalAbortHandler); // Clean up listener if successful
+      if (baseApi) {
+        // Add translator-specific capabilities
+        const originalCapabilities = baseApi.capabilities;
+        baseApi.capabilities = async () => {
+          const baseCapabilities = await originalCapabilities();
+          return {
+            ...baseCapabilities,
+            languagePairAvailable: baseApi.languagePairAvailable,
+          };
+        };
 
-    return summarizerInstance;
-  }
+        // Add languagePairAvailable function
+        baseApi.languagePairAvailable = async (options = {}) => {
+          if (!options?.sourceLanguage || !options?.targetLanguage) {
+            return "unavailable";
+          }
+          return (await KeyManager.ensureApiKeyLoaded())
+            ? "available"
+            : "unavailable";
+        };
+      }
 
-  /** Creates the `summarizer` API object */
-  function createSummarizerApiObject() {
-    const summarizerApi = {
-      /** Check summarizer availability (depends on API key) */
-      capabilities: async function () {
-        // Reusing languageModel logic, as availability is the same
-        const key = await ensureApiKey();
-        return { available: key ? "readily" : "no" };
-      },
-      /** Check availability with specific options (simplified emulation) */
-      availability: async function (options = {}) {
-        // Emulation: Assume any option is available if the key exists.
-        // A real implementation would check model support for languages/types.
-        // 'downloadable'/'downloading' aren't applicable here.
-        const key = await ensureApiKey();
-        // TODO: Could add basic checks, e.g., if options.type is valid?
-        return key ? "available" : "unavailable";
-      },
-      /** Create a new summarizer instance */
-      create: async function (options = {}) {
-        const key = await ensureApiKey();
-        if (!key) {
-          throw new Error(
-            `${EMULATED_NAMESPACE}.summarizer: Cannot create instance, OpenRouter API Key is not configured.`,
-          );
-        }
-        // Ignore monitor option in emulation
-        const { monitor, ...restOptions } = options;
-        if (monitor) {
-          console.warn(
-            `${EMULATED_NAMESPACE}.summarizer: 'monitor' option is ignored in this emulation.`,
-          );
-        }
-        return createSummarizerInstance(key, restOptions);
-      },
+      return baseApi;
     };
-    return summarizerApi;
+
+    const apiDefinitions = [
+      {
+        name: "languageModel",
+        lower: "languageModel",
+        InstanceClass: LanguageModelSession,
+        enabled: Config.ENABLE_PROMPT_API,
+        apiCreator: createApiStatic,
+      },
+      {
+        name: "summarizer",
+        lower: "summarizer",
+        InstanceClass: SummarizerInstance,
+        enabled: Config.ENABLE_SUMMARIZER_API,
+        apiCreator: createApiStatic,
+      },
+      {
+        name: "writer",
+        lower: "writer",
+        InstanceClass: WriterInstance,
+        enabled: Config.ENABLE_WRITER_API,
+        apiCreator: createApiStatic,
+      },
+      {
+        name: "rewriter",
+        lower: "rewriter",
+        InstanceClass: RewriterInstance,
+        enabled: Config.ENABLE_REWRITER_API,
+        apiCreator: createApiStatic,
+      },
+      {
+        name: "Translator",
+        lower: "translator",
+        InstanceClass: TranslatorInstance,
+        enabled: Config.ENABLE_TRANSLATOR_API,
+        apiCreator: createTranslatorApi,
+      },
+      {
+        name: "LanguageDetector",
+        lower: "languageDetector",
+        InstanceClass: LanguageDetectorInstance,
+        enabled: Config.ENABLE_LANGUAGE_DETECTOR_API,
+        apiCreator: createApiStatic,
+      },
+    ];
+
+    apiDefinitions.forEach(
+      ({ name, lower, InstanceClass, enabled, apiCreator }) => {
+        const staticApi = apiCreator(name, InstanceClass, enabled); // Use primary name for static creator
+        if (staticApi) {
+          // Attach to primary name (e.g., ai.languageModel, ai.Translator)
+          Object.assign(aiNamespace[name], staticApi);
+          // If lowercase name is different, also attach to lowercase (e.g., ai.translator)
+          // Create static methods specifically for the lowercase name as well
+          if (name !== lower) {
+            const staticApiLower = apiCreator(lower, InstanceClass, enabled);
+            if (staticApiLower) {
+              // Ensure the lowercase object exists before assigning
+              if (!aiNamespace[lower]) aiNamespace[lower] = {};
+              Object.assign(aiNamespace[lower], staticApiLower);
+            }
+          }
+        }
+      },
+    );
+
+    let logMessage = `Chrome AI API emulator initialized.`;
+    const enabledApiNames = apiDefinitions
+      .filter((api) => api.enabled)
+      .map((api) => api.lower); // Use lowercase names for logging
+    if (enabledApiNames.length > 0) {
+      logMessage += ` Enabled APIs: [${enabledApiNames.join(", ")}].`;
+      const accessPoint = Object.keys(nsTarget).includes(nsName)
+        ? `window.${nsName}`
+        : `unsafeWindow.${nsName}`;
+      logMessage += ` Access via: ${accessPoint}`;
+    } else {
+      logMessage += ` No APIs enabled.`;
+    }
+    Logger.log(logMessage);
+
+    if (!openRouterApiKey) {
+      Logger.warn(
+        `OpenRouter API Key is not set. Use Tampermonkey menu. APIs will fail.`,
+      );
+      Object.entries(pendingPromises).forEach(([apiName, { reject }]) => {
+        if (reject) reject(new APIError(`${apiName}: API key not configured.`));
+      });
+    } else {
+      Logger.log(`OpenRouter API Key loaded.`);
+    }
+
+    if (nsTarget[Config.PENDING_PROMISES_KEY]) {
+      Object.values(nsTarget[Config.PENDING_PROMISES_KEY]).forEach((p) => {
+        p.resolve = null;
+        p.reject = null;
+      });
+      delete nsTarget[Config.PENDING_PROMISES_KEY];
+      Logger.log(`Cleaned up pending promise tracking.`);
+    }
   }
 
-  // --- Initialization ---
-
-  /**
-   * Initializes the Chrome AI API emulators and attaches them to the window.
-   * @async
-   */
-  async function init() {
-    if (!NAMESPACE_TARGET[EMULATED_NAMESPACE]) {
-      NAMESPACE_TARGET[EMULATED_NAMESPACE] = {};
-      console.log(`${EMULATED_NAMESPACE}: Created global namespace.`);
-    } else {
-      console.log(`${EMULATED_NAMESPACE}: Using existing global namespace.`);
-    }
-
-    const attachedAPIs = [];
-
-    // Initialize Prompt API (languageModel)
-    if (!NAMESPACE_TARGET[EMULATED_NAMESPACE].languageModel) {
-      NAMESPACE_TARGET[EMULATED_NAMESPACE].languageModel =
-        createLanguageModelApiObject();
-      attachedAPIs.push("languageModel");
-    } else {
-      console.warn(
-        `${EMULATED_NAMESPACE}: languageModel already exists on namespace target. Skipping attachment.`,
-      );
-    }
-
-    // Initialize Summarizer API
-    if (!NAMESPACE_TARGET[EMULATED_NAMESPACE].summarizer) {
-      NAMESPACE_TARGET[EMULATED_NAMESPACE].summarizer =
-        createSummarizerApiObject();
-      attachedAPIs.push("summarizer");
-    } else {
-      console.warn(
-        `${EMULATED_NAMESPACE}: summarizer already exists on namespace target. Skipping attachment.`,
-      );
-    }
-
-    if (attachedAPIs.length > 0) {
-      console.log(
-        `${EMULATED_NAMESPACE}: Chrome AI API emulator loaded. Attached: [${attachedAPIs.join(", ")}]. Access via: ${Object.keys(NAMESPACE_TARGET).includes(EMULATED_NAMESPACE) ? `window.${EMULATED_NAMESPACE}` : "unsafeWindow." + EMULATED_NAMESPACE}`,
-      );
-    } else {
-      console.log(
-        `${EMULATED_NAMESPACE}: Chrome AI API emulator loaded, but no new APIs were attached (already existed).`,
-      );
-    }
-
-    // Check for API key status on load
-    ensureApiKey();
+  // --- Script Execution ---
+  setupPlaceholders(); // Run immediately
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () =>
+      initializeApis().catch(handleInitError),
+    );
+  } else {
+    initializeApis().catch(handleInitError);
   }
-
-  init();
+  function handleInitError(error) {
+    Logger.error(`Fatal error during initialization:`, error);
+    alert(
+      `Chrome AI Emulator: Failed to initialize. Check console. Error: ${error.message}`,
+    );
+  }
 })();
