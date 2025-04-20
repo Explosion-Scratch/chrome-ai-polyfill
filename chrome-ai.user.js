@@ -49,7 +49,7 @@
     DEFAULT_WRITER_MODEL: "meta-llama/llama-4-scout:free",
     DEFAULT_REWRITER_MODEL: "meta-llama/llama-4-scout:free",
     DEFAULT_TRANSLATOR_MODEL: "google/gemma-3-1b-it:free",
-    DEFAULT_LANGUAGE_DETECTOR_MODEL: "meta-llama/llama-4-scout:free", // Needs good JSON output
+    DEFAULT_LANGUAGE_DETECTOR_MODEL: "google/gemma-3-1b-it:free", // Needs good JSON output
 
     // Resource Limits & Ratios
     MAX_CONTEXT_TOKENS: 128000, // Note: Specific model limits may be lower
@@ -95,11 +95,11 @@
     - Length (Guideline): {length}
     Output ONLY the rewritten text, adhering strictly to the transformation requested. Do not add conversational filler.${FORCE_COMPLETION_SUFFIX}`.trim(),
 
-    // Translator uses {sourceLanguage}, {targetLanguage}
+    // Translator uses {sourceLanguage}, {targetLanguage}, {sourceLanguageLong}, {targetLanguageLong}
     TRANSLATOR_SYSTEM_PROMPT: `
     You are a text translator. Translate the user's input text accurately from the source language to the target language.
-    Source Language (BCP 47): {sourceLanguage}
-    Target Language (BCP 47): {targetLanguage}
+    Source Language: {sourceLanguageLong} (BCP 47: {sourceLanguage})
+    Target Language: {targetLanguageLong} (BCP 47: {targetLanguage})
     Output ONLY the translated text in the target language. Do not add any extra information, explanations, greetings, or apologies.${FORCE_COMPLETION_SUFFIX}`.trim(),
 
     // Language Detector: System prompt instructs model on JSON output format.
@@ -166,6 +166,32 @@
 
   // --- Utility Functions ---
   const Utils = {
+    /** Converts BCP 47 language tag to human-readable language name. */
+    languageTagToHumanReadable: function(languageTag, displayLanguage = 'en') {
+      try {
+        const displayNames = new Intl.DisplayNames([displayLanguage], {
+          type: 'language',
+        });
+        return displayNames.of(languageTag);
+      } catch (e) {
+        Logger.warn(`Could not convert language tag ${languageTag} to human-readable form:`, e);
+        return languageTag; // Fallback to original tag
+      }
+    },
+    
+    /** Normalizes confidence values in language detection results so they sum to 1.0 */
+    normalizeConfidences: function(results) {
+      if (!Array.isArray(results) || results.length === 0) return results;
+      
+      const sum = results.reduce((acc, item) => acc + item.confidence, 0);
+      if (sum === 0) return results; // Avoid division by zero
+      
+      return results.map(item => ({
+        ...item,
+        confidence: Math.round((item.confidence / sum) * 1000) / 1000 // Round to 3 decimal places
+      }));
+    },
+    
     /** Checks for CSP blockage using fetch and SecurityPolicyViolationEvent. @async */
     isBlocked: async function (domain, timeout = 500) {
       const normalizedDomain = domain
@@ -746,6 +772,20 @@
         );
       }
     }
+
+    /**
+     * Creates a new instance with the same configuration as this one.
+     * Derived classes should override this method to include class-specific properties.
+     * @returns {BaseApiInstance} A new instance with the same configuration
+     */
+    clone() {
+      Logger.log(`${this._apiName}: Creating clone of instance`);
+      // By default, just create a new instance with the same options
+      const clonedInstance = new this.constructor(this._apiKey, {
+        ...this._options,
+      });
+      return clonedInstance;
+    }
     get inputQuota() {
       return Config.MAX_CONTEXT_TOKENS;
     }
@@ -1020,7 +1060,7 @@
         messages: messagesForApi,
         callOptions,
         parameters,
-        accumulated: true, // Changed to false to match the expected behavior of streaming deltas
+        accumulated: false,
         onSuccess: () => {
           // Spec is unclear how history is updated on streaming.
           // Assuming update after stream completion IF we could capture fullResponse.
@@ -1056,6 +1096,26 @@
         });
       }
     }
+
+    /**
+     * Creates a clone of this language model session with the same configuration and history.
+     * @returns {LanguageModelSession} A new instance with copied configuration and history
+     */
+    clone() {
+      // Create a new instance with the same options
+      const clonedInstance = super.clone();
+
+      // Copy parameters
+      clonedInstance._parameters = { ...this._parameters };
+
+      // Deep copy of history (clone all messages)
+      clonedInstance._history = this._history.map((msg) => ({ ...msg }));
+
+      Logger.log(
+        `${this._apiName}: Cloned instance with ${clonedInstance._history.length} history items`,
+      );
+      return clonedInstance;
+    }
   }
 
   class SummarizerInstance extends BaseApiInstance {
@@ -1084,6 +1144,23 @@
           })
         );
       }
+    }
+
+    /**
+     * Creates a clone of this summarizer instance with the same configuration.
+     * @returns {SummarizerInstance} A new instance with the same configuration
+     */
+    clone() {
+      // Create a new instance with the same options
+      const clonedInstance = super.clone();
+
+      // Copy system prompt
+      clonedInstance._systemPrompt = this._systemPrompt;
+
+      Logger.log(
+        `${this._apiName}: Cloned instance with same system prompt configuration`,
+      );
+      return clonedInstance;
     }
     async summarize(text, callOptions = {}) {
       if (typeof text !== "string")
@@ -1142,6 +1219,23 @@
         );
       }
     }
+
+    /**
+     * Creates a clone of this writer instance with the same configuration.
+     * @returns {WriterInstance} A new instance with the same configuration
+     */
+    clone() {
+      // Create a new instance with the same options
+      const clonedInstance = super.clone();
+
+      // Copy system prompt
+      clonedInstance._systemPrompt = this._systemPrompt;
+
+      Logger.log(
+        `${this._apiName}: Cloned instance with same system prompt configuration`,
+      );
+      return clonedInstance;
+    }
     async write(taskPrompt, callOptions = {}) {
       if (typeof taskPrompt !== "string")
         throw new TypeError("Input 'taskPrompt' must be string.");
@@ -1188,6 +1282,17 @@
           })
         );
       }
+    }
+
+    /**
+     * Creates a clone of this rewriter instance with the same configuration.
+     * @returns {RewriterInstance} A new instance with the same configuration
+     */
+    clone() {
+      // For RewriterInstance, the base clone is sufficient as there's no additional state to copy
+      const clonedInstance = super.clone();
+      Logger.log(`${this._apiName}: Cloned instance with same configuration`);
+      return clonedInstance;
     }
     _buildSystemPrompt(
       instructions,
@@ -1306,6 +1411,25 @@
         );
       }
     }
+
+    /**
+     * Creates a clone of this translator instance with the same configuration.
+     * @returns {TranslatorInstance} A new instance with the same configuration
+     */
+    clone() {
+      // Create a new instance with the same options
+      const clonedInstance = super.clone();
+
+      // Copy specific properties
+      clonedInstance._sourceLanguage = this._sourceLanguage;
+      clonedInstance._targetLanguage = this._targetLanguage;
+      clonedInstance._systemPrompt = this._systemPrompt;
+
+      Logger.log(
+        `${this._apiName}: Cloned instance with source=${this._sourceLanguage}, target=${this._targetLanguage}`,
+      );
+      return clonedInstance;
+    }
     async translate(text, callOptions = {}) {
       if (typeof text !== "string")
         throw new TypeError("Input 'text' must be string.");
@@ -1361,6 +1485,29 @@
           })
         );
       }
+    }
+
+    /**
+     * Creates a clone of this language detector instance with the same configuration.
+     * @returns {LanguageDetectorInstance} A new instance with the same configuration
+     */
+    clone() {
+      // Create a new instance with the same options
+      const clonedInstance = super.clone();
+
+      // Copy expected input languages
+      clonedInstance._expectedInputLanguages = this._expectedInputLanguages
+        ? [...this._expectedInputLanguages]
+        : undefined;
+
+      Logger.log(
+        `${this._apiName}: Cloned instance with ${
+          this._expectedInputLanguages
+            ? `${this._expectedInputLanguages.length} expected languages`
+            : "no expected languages"
+        }`,
+      );
+      return clonedInstance;
     }
     async detect(text, callOptions = {}) {
       if (typeof text !== "string")
