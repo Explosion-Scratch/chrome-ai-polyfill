@@ -190,7 +190,8 @@
       }
 
       // Create a new promise for this operation
-      const promise = new Promise((resolve, reject) => {
+      let promise; // Declare promise variable first
+      promise = new Promise((resolve, reject) => {
         const executeLatestCall = () => {
           try {
             const pendingInfo = this.pendingPromises.get(key);
@@ -1609,7 +1610,7 @@
         .replace("{tone}", tone)
         .replace("{length}", length);
     }
-    async rewrite(text, callOptions) {
+    async rewrite(text, callOptions = {}) {
       if (typeof text !== "string")
         throw new TypeError("Input 'text' must be string.");
 
@@ -1634,7 +1635,7 @@
 
       return this._performApiRequest({ messages, callOptions });
     }
-    rewriteStreaming(text, callOptions) {
+    rewriteStreaming(text, callOptions = {}) {
       if (typeof text !== "string")
         throw new TypeError("Input 'text' must be string.");
 
