@@ -18,6 +18,7 @@
 // @run-at      document-start
 // ==/UserScript==
 
+// TODO: Make intermeddiate markdown bullet points not result in headers
 // Disclaimer: AI + my guidance, refactoring, and testing used to create this.
 
 (function () {
@@ -388,6 +389,13 @@
     formatResponse: function (text, expecting = "markdown") {
       if (typeof text !== "string" || !text) return text || "";
 
+      const leadingWhitespace = text.match(/^\s*/)?.[0] || "";
+      const trailingWhitespace = text.match(/\s*$/)?.[0] || "";
+      const content = text.slice(
+        leadingWhitespace.length,
+        -trailingWhitespace.length || undefined,
+      );
+
       const markdownToPlainText = function (markdown) {
         try {
           if (
@@ -455,20 +463,25 @@
         }
       };
 
-      const formatType = (expecting || "markdown").toLowerCase();
+      const transformContent = function (content, formatType) {
+        switch (formatType) {
+          case "json":
+            return content
+              .replace(/^\s*```(?:json|JSON)?\s*[\r\n]*/, "")
+              .replace(/[\r\n]*\s*```\s*$/, "")
+              .trim();
+          case "plain-text":
+            return markdownToPlainText(content);
+          case "markdown":
+          default:
+            return content.trim();
+        }
+      };
 
-      switch (formatType) {
-        case "json":
-          return text
-            .replace(/^\s*```(?:json|JSON)?\s*[\r\n]*/, "")
-            .replace(/[\r\n]*\s*```\s*$/, "")
-            .trim();
-        case "plain-text":
-          return markdownToPlainText(text);
-        case "markdown":
-        default:
-          return text.trim();
-      }
+      const formatType = (expecting || "markdown").toLowerCase();
+      const transformed = transformContent(content, formatType);
+
+      return leadingWhitespace + transformed + trailingWhitespace;
     },
 
     /**
