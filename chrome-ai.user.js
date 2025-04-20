@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Chrome AI APIs Emulator (via OpenRouter)
 // @namespace   mailto:explosionscratch@gmail.com
-// @version     3.1
+// @version     3.2
 // @description Emulates experimental Chrome AI APIs (Prompt, Writing Assistance, Translation, Language Detection) using OpenRouter.
 // @author      Explosion Implosion
 // @match       *://*/*
@@ -12,6 +12,8 @@
 // @grant       GM_registerMenuCommand
 // @grant       GM.xmlHttpRequest
 // @require     https://cdn.jsdelivr.net/npm/@trim21/gm-fetch
+// @require     https://cdn.jsdelivr.net/npm/marked/marked.min.js
+// @require     https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js
 // @connect     openrouter.ai
 // @run-at      document-start
 // ==/UserScript==
@@ -58,13 +60,13 @@
     TOKEN_CHAR_RATIO: 5, // Rough estimate
 
     // Rate Limiting & Debounce Settings
-    RATE_DEBOUNCE: 5000, // Debounce time in milliseconds
+    RATE_DEBOUNCE: 500, // Debounce time in milliseconds (Reduced from 5000 for better responsiveness)
     RATE_REQUESTS_PER_WINDOW: 10, // Maximum number of requests per window
     RATE_REQUEST_WINDOW: 30000, // Window size in milliseconds (30 seconds)
 
     // OpenRouter Request Headers
     YOUR_SITE_URL: "about:blank", // Recommended: Replace with your specific site if applicable
-    YOUR_APP_NAME: "ChromeAI_API_Emulator_v3.1",
+    YOUR_APP_NAME: "ChromeAI_API_Emulator_v3.2", // Updated version
 
     // Storage & Namespace
     API_KEY_STORAGE_KEY: "openrouter_api_key",
@@ -134,6 +136,7 @@
       this.windowMs = windowMs;
       this.requestTimestamps = [];
       this.debounceTimers = new Map();
+      this.pendingPromises = new Map(); // Moved initialization here
     }
 
     /**
@@ -170,70 +173,93 @@
      */
     async execute(fn, key, ...args) {
       if (this.wouldExceedRateLimit()) {
-        throw new APIError(
+        const error = new APIError(
           `Rate limit exceeded. Maximum ${this.maxRequests} requests per ${this.windowMs / 1000} seconds.`,
         );
+        // Optionally log the error or handle it differently
+        Logger.warn(`Rate limit check failed for key: ${key}`);
+        throw error; // Throw immediately if rate limit is hit
       }
 
-      // Store for pending promises with their resolvers/rejecters
-      if (!this.pendingPromises) {
-        this.pendingPromises = new Map();
-      }
-
-      // If we already have a pending promise for this key, return it
-      // but update the function arguments to the latest ones
+      // If we already have a pending promise for this key, update its args and return it
       if (this.pendingPromises.has(key)) {
         const pendingInfo = this.pendingPromises.get(key);
         pendingInfo.latestArgs = args; // Update to use the latest arguments
-        pendingInfo.latestFn = fn; // Use the latest function
+        pendingInfo.latestFn = fn; // Update to use the latest function
+        // Clear existing timer, a new one will be set below
+        if (this.debounceTimers.has(key)) {
+          clearTimeout(this.debounceTimers.get(key));
+          this.debounceTimers.delete(key); // Remove old timer reference
+        }
+        // Set a new timer to execute the updated call
+        const timerId = setTimeout(
+          () => this._executePending(key),
+          this.debounceMs,
+        );
+        this.debounceTimers.set(key, timerId);
         return pendingInfo.promise; // Return the existing promise
       }
 
       // Create a new promise for this operation
-      let promise; // Declare promise variable first
-      promise = new Promise((resolve, reject) => {
-        const executeLatestCall = () => {
-          try {
-            const pendingInfo = this.pendingPromises.get(key);
-            if (!pendingInfo) return; // Safety check
-
-            // Get the latest arguments and function reference
-            const latestArgs = pendingInfo.latestArgs;
-            const latestFn = pendingInfo.latestFn;
-
-            // Record the request and execute with latest args
-            this.recordRequest();
-            const result = latestFn(...latestArgs);
-            resolve(result);
-          } catch (error) {
-            reject(error);
-          } finally {
-            // Clean up
-            this.pendingPromises.delete(key);
-            this.debounceTimers.delete(key);
-          }
-        };
-
-        // Store the promise info
-        this.pendingPromises.set(key, {
-          promise,
-          latestArgs: args,
-          latestFn: fn,
-          resolve,
-          reject,
-        });
-
-        // Clear any existing timer
-        if (this.debounceTimers.has(key)) {
-          clearTimeout(this.debounceTimers.get(key));
-        }
-
-        // Set a timer to execute after the debounce period
-        const timerId = setTimeout(executeLatestCall, this.debounceMs);
-        this.debounceTimers.set(key, timerId);
+      let resolvePromise, rejectPromise;
+      const promise = new Promise((resolve, reject) => {
+        resolvePromise = resolve;
+        rejectPromise = reject;
       });
 
+      // Store the promise info
+      this.pendingPromises.set(key, {
+        promise,
+        latestArgs: args,
+        latestFn: fn,
+        resolve: resolvePromise,
+        reject: rejectPromise,
+      });
+
+      // Set a timer to execute after the debounce period
+      const timerId = setTimeout(
+        () => this._executePending(key),
+        this.debounceMs,
+      );
+      this.debounceTimers.set(key, timerId);
+
       return promise;
+    }
+
+    /** Internal function to execute the debounced call */
+    async _executePending(key) {
+      const pendingInfo = this.pendingPromises.get(key);
+      if (!pendingInfo) {
+        // This might happen if the promise was somehow resolved/rejected early or cancelled
+        Logger.warn(`_executePending called for non-existent key: ${key}`);
+        return;
+      }
+
+      // Clear the timer associated with this key as we are executing now
+      this.debounceTimers.delete(key);
+
+      // Check rate limit again *right before* executing
+      if (this.wouldExceedRateLimit()) {
+        const error = new APIError(
+          `Rate limit exceeded at execution time for key ${key}. Max ${this.maxRequests}/${this.windowMs / 1000}s.`,
+        );
+        Logger.warn(error.message);
+        pendingInfo.reject(error);
+        this.pendingPromises.delete(key); // Clean up
+        return;
+      }
+
+      try {
+        // Record the request *before* the async operation starts
+        this.recordRequest();
+        const result = await pendingInfo.latestFn(...pendingInfo.latestArgs);
+        pendingInfo.resolve(result);
+      } catch (error) {
+        pendingInfo.reject(error);
+      } finally {
+        // Clean up after execution (success or failure)
+        this.pendingPromises.delete(key);
+      }
     }
   }
 
@@ -250,11 +276,21 @@
       console.error(`[${Config.EMULATED_NAMESPACE}] ${message}`, ...args),
     /** Logs the prompt being sent to the API */
     logPrompt: (apiName, messages) => {
-      console.groupCollapsed(
-        `[${Config.EMULATED_NAMESPACE}] API Call: ${apiName} - Prompt Details`,
-      );
-      console.log("Messages:", messages);
-      console.groupEnd();
+      // Use try-catch for JSON stringify in case of circular references etc.
+      try {
+        console.groupCollapsed(
+          `[${Config.EMULATED_NAMESPACE}] API Call: ${apiName} - Prompt Details (Click to expand)`,
+        );
+        console.log("Messages:", JSON.parse(JSON.stringify(messages))); // Clone for safety
+      } catch (e) {
+        console.groupCollapsed(
+          `[${Config.EMULATED_NAMESPACE}] API Call: ${apiName} - Prompt Details (Stringified)`,
+        );
+        console.log("Messages (raw):", messages); // Fallback if stringify fails
+        console.warn("Could not serialize messages for detailed logging:", e);
+      } finally {
+        console.groupEnd();
+      }
     },
   };
 
@@ -295,42 +331,80 @@
     /**
      * Formats API response text based on expected format
      * @param {string} text - The text to format
-     * @param {string} expecting - Format to convert to: 'json', 'markdown', or 'plain-text'
+     * @param {string} [expecting='markdown'] - Format to convert to: 'json', 'markdown', or 'plain-text'
      * @returns {string} Formatted text
      */
     formatResponse: function (text, expecting = "markdown") {
-      if (!text) return text;
+      if (typeof text !== "string" || !text) return text || "";
 
       // Helper function to convert markdown to plain text using marked and DOMPurify
-      // Assumes libraries are already loaded globally
+      // Assumes libraries are already loaded globally via @require
       const markdownToPlainText = function (markdown) {
         try {
+          if (
+            typeof window.marked?.parse !== "function" ||
+            typeof window.DOMPurify?.sanitize !== "function"
+          ) {
+            Logger.warn(
+              "marked or DOMPurify not available for plain-text conversion. Returning raw markdown.",
+            );
+            return markdown;
+          }
           // Convert markdown to HTML and sanitize
-          const html = window.marked.parse(markdown);
-          const sanitizedHtml = window.DOMPurify.sanitize(html);
+          // Disable heading IDs generation which might add unwanted chars
+          const html = window.marked.parse(markdown, {
+            headerIds: false,
+            mangle: false,
+          });
+          // Allow basic formatting tags for better plain text structure, but strip most things
+          const sanitizedHtml = window.DOMPurify.sanitize(html, {
+            ALLOWED_ATTR: [], // No attributes allowed
+          });
 
           // Convert HTML to plain text
           const tempDiv = document.createElement("div");
           tempDiv.innerHTML = sanitizedHtml;
-          return tempDiv.textContent || tempDiv.innerText || "";
+
+          // Attempt to preserve some line breaks from <p> and <li> tags
+          tempDiv.querySelectorAll("p, li").forEach((el) => {
+            // Add a newline before list items (except the first) or paragraphs
+            if (el.tagName === "LI") {
+              if (el.previousElementSibling?.tagName === "LI") {
+                el.prepend(document.createTextNode("\n\t- "));
+              } else {
+                el.prepend(document.createTextNode("\t- "));
+              }
+            } else if (el.tagName === "P" && el.previousElementSibling) {
+              el.prepend(document.createTextNode("\n\n"));
+            }
+          });
+          // Replace <br> with newline
+          tempDiv
+            .querySelectorAll("br")
+            .forEach((br) => br.replaceWith(document.createTextNode("\n")));
+
+          // Get text content, which should now have better spacing
+          let plainText = tempDiv.textContent || tempDiv.innerText || "";
+          return plainText.replace(/\n{3,}/g, "\n\n").trim(); // Collapse excessive newlines
         } catch (error) {
           Logger.warn(
-            `Error converting markdown to plain text: ${error.message}`,
+            `Error converting markdown to plain text: ${error.message}. Returning raw markdown.`,
+            error,
           );
           return markdown; // Return original text if conversion fails
         }
       };
 
-      switch (expecting.toLowerCase()) {
+      const formatType = (expecting || "markdown").toLowerCase();
+
+      switch (formatType) {
         case "json":
-          // Remove code fences and language tags for JSON
-          // Handle both complete and incomplete code blocks
+          // Remove code fences and language tags for JSON more robustly
+          // Assumes the core JSON is the main part of the response
           return text
-            .replace(/^```(?:json|JSON)?\s*/g, "") // Remove opening fence (case insensitive)
-            .replace(/```\s*$/g, "") // Remove closing fence
-            .replace(/^```(?:json|JSON)?$/gm, "") // Remove solitary opening fences
-            .replace(/^```$/gm, "") // Remove solitary closing fences
-            .trim();
+            .replace(/^\s*```(?:json|JSON)?\s*[\r\n]*/, "") // Start fence with optional language and newline
+            .replace(/[\r\n]*\s*```\s*$/, "") // End fence with optional preceding newline
+            .trim(); // Trim whitespace after removal
 
         case "plain-text":
           // Use the synchronous markdownToPlainText function
@@ -338,8 +412,8 @@
 
         case "markdown":
         default:
-          // Return markdown as-is
-          return text;
+          // Return markdown as-is (but trim whitespace)
+          return text.trim();
       }
     },
 
@@ -351,10 +425,18 @@
         });
         return displayNames.of(languageTag);
       } catch (e) {
-        Logger.warn(
-          `Could not convert language tag ${languageTag} to human-readable form:`,
-          e,
-        );
+        // Handle common invalid tag case gracefully
+        if (
+          e instanceof RangeError &&
+          e.message.includes("invalid language tag")
+        ) {
+          Logger.warn(`Invalid language tag provided: "${languageTag}"`);
+        } else {
+          Logger.warn(
+            `Could not convert language tag ${languageTag} to human-readable form:`,
+            e,
+          );
+        }
         return languageTag; // Fallback to original tag
       }
     },
@@ -363,51 +445,127 @@
     normalizeConfidences: function (results) {
       if (!Array.isArray(results) || results.length === 0) return results;
 
-      const sum = results.reduce((acc, item) => acc + item.confidence, 0);
-      if (sum === 0) return results; // Avoid division by zero
+      // Filter out any invalid entries first
+      const validResults = results.filter(
+        (item) =>
+          typeof item === "object" &&
+          item !== null &&
+          typeof item.confidence === "number" &&
+          isFinite(item.confidence) &&
+          item.confidence >= 0,
+      );
 
-      return results.map((item) => ({
-        ...item,
-        confidence: Math.round((item.confidence / sum) * 1000) / 1000, // Round to 3 decimal places
-      }));
+      if (validResults.length === 0) return []; // Return empty if no valid results
+
+      const sum = validResults.reduce((acc, item) => acc + item.confidence, 0);
+
+      // If sum is 0 or negative, can't normalize meaningfully. Return as is or assign equal probability?
+      // Let's assign equal probability if sum is 0 and there are items.
+      if (sum <= 0) {
+        if (validResults.length > 0) {
+          const equalConfidence = parseFloat(
+            (1.0 / validResults.length).toFixed(3),
+          ); // Round to 3 decimals
+          return validResults.map((item) => ({
+            ...item,
+            confidence: equalConfidence,
+          }));
+        } else {
+          return []; // Should have been caught earlier, but safety check
+        }
+      }
+
+      // Normalize valid results
+      let normalizedSum = 0;
+      const normalizedResults = validResults.map((item, index, arr) => {
+        // Round to 3 decimal places, ensuring the last item adjusts to make sum exactly 1.0 if possible
+        let normalizedConfidence;
+        if (index === arr.length - 1) {
+          normalizedConfidence = parseFloat((1.0 - normalizedSum).toFixed(3));
+        } else {
+          normalizedConfidence = parseFloat((item.confidence / sum).toFixed(3));
+          normalizedSum += normalizedConfidence;
+        }
+        // Clamp values just in case of floating point issues after normalization
+        normalizedConfidence = Math.max(
+          0.0,
+          Math.min(1.0, normalizedConfidence),
+        );
+        return { ...item, confidence: normalizedConfidence };
+      });
+
+      // Final sort by normalized confidence descending
+      return normalizedResults.sort((a, b) => b.confidence - a.confidence);
     },
 
     /** Checks for CSP blockage using fetch and SecurityPolicyViolationEvent. @async */
     isBlocked: async function (domain, timeout = 500) {
+      // Normalize domain and create test URL
       const normalizedDomain = domain
         .replace(/^(https?:\/\/)?/, "")
         .split("/")[0];
+      if (!normalizedDomain) {
+        Logger.warn("isBlocked: Invalid domain provided.");
+        return Promise.resolve(false); // Cannot be blocked if domain is invalid
+      }
       const testUrl = `https://${normalizedDomain}/`;
-      return new Promise((resolve) => {
-        let violationDetected = false;
-        let timerId = null;
-        const listener = (event) => {
-          if (
-            event.blockedURI.includes(normalizedDomain) &&
-            (event.violatedDirective.startsWith("connect-src") ||
-              event.violatedDirective.startsWith("default-src"))
-          ) {
-            violationDetected = true;
-            clearTimeout(timerId);
+
+      // Use Promise.race for faster resolution on event or timeout
+      return Promise.race([
+        // Promise that resolves true on CSP violation
+        new Promise((resolve) => {
+          const listener = (event) => {
+            if (
+              event.blockedURI.includes(normalizedDomain) &&
+              (event.violatedDirective.startsWith("connect-src") ||
+                event.violatedDirective.startsWith("default-src"))
+            ) {
+              // Logger.log(`CSP Violation Detected for ${normalizedDomain} via event.`);
+              document.removeEventListener("securitypolicyviolation", listener);
+              resolve(true);
+            }
+          };
+          document.addEventListener("securitypolicyviolation", listener);
+          // Set a timeout to remove the listener if no violation is detected quickly
+          setTimeout(() => {
             document.removeEventListener("securitypolicyviolation", listener);
-            resolve(true);
-          }
-        };
-        document.addEventListener("securitypolicyviolation", listener);
-        fetch(testUrl, { method: "HEAD", mode: "no-cors", cache: "no-store" })
-          .then((response) => {
-            // Logger.log(`CSP Check: Fetch attempt to ${testUrl} allowed (status: ${response.status}).`);
+            // Don't resolve here, let the fetch/timeout promise handle non-detection
+          }, timeout + 50); // Slightly longer than the main timeout
+        }),
+
+        // Promise that attempts fetch and resolves false on success/timeout, true on specific network errors
+        new Promise((resolve) => {
+          const controller = new AbortController();
+          const signal = controller.signal;
+          const timerId = setTimeout(() => {
+            controller.abort();
+            // Logger.log(`CSP Check for ${normalizedDomain} timed out.`);
+            resolve(false); // Assume not blocked if timed out
+          }, timeout);
+
+          fetch(testUrl, {
+            method: "HEAD",
+            mode: "no-cors",
+            cache: "no-store",
+            signal,
           })
-          .catch((error) => {
-            // Rely primarily on the event
-          });
-        timerId = setTimeout(() => {
-          if (!violationDetected) {
-            document.removeEventListener("securitypolicyviolation", listener);
-            resolve(false);
-          }
-        }, timeout);
-      });
+            .then(() => {
+              // Logger.log(`CSP Check: Fetch HEAD to ${testUrl} seemingly allowed (no-cors).`);
+              clearTimeout(timerId);
+              resolve(false); // Request went through (even if opaque), likely not CSP blocked
+            })
+            .catch((error) => {
+              clearTimeout(timerId);
+              // A TypeError *might* indicate a CSP block in some browsers/contexts, but often just network issues.
+              // AbortError is expected on timeout.
+              // We rely more heavily on the securitypolicyviolation event.
+              // if (error.name !== 'AbortError') {
+              //     Logger.log(`CSP Check: Fetch to ${testUrl} failed. Error: ${error.name} - ${error.message}. Relying on event.`);
+              // }
+              resolve(false); // Assume not blocked on fetch error, rely on event listener
+            });
+        }),
+      ]);
     },
 
     /** Estimates token count (simple char-based). */
@@ -416,7 +574,10 @@
 
     /** Calculates total tokens for an array of messages. */
     calculateTotalTokens: (messages) =>
-      messages.reduce((sum, msg) => sum + Utils.tokenize(msg.content), 0),
+      messages.reduce(
+        (sum, msg) => sum + Utils.tokenize(msg?.content || ""),
+        0,
+      ),
 
     /** Formats shared context string. */
     formatSharedContext: (sharedContext) =>
@@ -438,9 +599,16 @@
           try {
             const json = JSON.parse(dataContent);
             const delta = json?.choices?.[0]?.delta?.content;
-            if (delta) chunks.push(delta);
+            if (typeof delta === "string") {
+              // Ensure delta is a string, even if empty
+              chunks.push(delta);
+            }
           } catch (e) {
-            Logger.error(`Error parsing SSE chunk:`, dataContent, e);
+            // Log only if content wasn't empty/whitespace
+            if (dataContent) {
+              Logger.error(`Error parsing SSE chunk JSON:`, dataContent, e);
+            }
+            // Decide if we should push an empty string or skip? Skipping seems safer.
           }
         }
       }
@@ -456,7 +624,7 @@
       parameters,
       signal,
       accumulated = false,
-      responseFormat = "md",
+      responseFormat = "markdown", // Default format
       onSuccess,
     }) => {
       if (signal?.aborted) {
@@ -469,15 +637,37 @@
           start(controller) {
             controller.error(abortError);
           },
+          cancel(reason) {
+            Logger.log(`${apiName} stream cancelled early: ${reason}`);
+          },
         });
       }
 
       let streamController;
       let requestAbortedOrFinished = false;
+      let accumulatedResponseForHistory = ""; // For history update
 
       const stream = new ReadableStream({
         start: async (controller) => {
           streamController = controller;
+
+          // Abort handler specific to this stream operation
+          const abortHandler = (event) => {
+            if (requestAbortedOrFinished) return;
+            requestAbortedOrFinished = true;
+            const error = new DOMException(
+              "Operation aborted during stream.",
+              "AbortError",
+              { cause: signal.reason || event?.reason },
+            );
+            Logger.warn(`${apiName}: Stream aborted.`, error.cause);
+            try {
+              streamController?.error(error);
+            } catch (e) {
+              /* Ignore if controller already closed/errored */
+            }
+          };
+          signal?.addEventListener("abort", abortHandler, { once: true });
 
           // 1. Check Quota
           const totalTokens = Utils.calculateTotalTokens(messages);
@@ -491,6 +681,7 @@
               `Requested: ${totalTokens}, Quota: ${Config.MAX_CONTEXT_TOKENS}`,
             );
             requestAbortedOrFinished = true;
+            signal?.removeEventListener("abort", abortHandler);
             streamController.error(error);
             return;
           }
@@ -498,64 +689,96 @@
           // 2. Call API
           try {
             await CoreAPI.askOpenRouter({
-              apiName, // Pass apiName for logging
+              apiName,
               apiKey,
               messages,
               model,
               parameters,
               stream: true,
-              signal,
+              signal, // Pass the signal down
+              responseFormat: responseFormat, // Pass format down
               on: {
-                chunk: (delta, acc) => {
+                chunk: (formattedDelta, formattedAccumulated, rawDelta) => {
                   if (requestAbortedOrFinished || !streamController) return;
+                  accumulatedResponseForHistory += rawDelta || ""; // Accumulate raw for history
                   try {
-                    // Enqueue accumulated text or just the delta based on 'accumulated' flag
-                    streamController.enqueue(accumulated ? acc : delta);
+                    // Enqueue formatted text (delta or accumulated based on flag)
+                    streamController.enqueue(
+                      accumulated ? formattedAccumulated : formattedDelta,
+                    );
                   } catch (e) {
                     Logger.error(`${apiName}: Error enqueuing chunk:`, e);
                     requestAbortedOrFinished = true;
+                    signal?.removeEventListener("abort", abortHandler);
                     try {
                       streamController.error(e);
                     } catch (_) {}
                   }
                 },
-                finish: (/* fullMessage */) => {
+                finish: (/* formattedFullMessage */) => {
                   if (requestAbortedOrFinished || !streamController) return;
                   requestAbortedOrFinished = true;
-                  Logger.log(`${apiName}: Streaming finished.`);
+                  signal?.removeEventListener("abort", abortHandler);
+                  Logger.log(`${apiName}: Streaming finished successfully.`);
                   try {
                     streamController.close();
-                    onSuccess?.();
-                  } catch (_) {
+                    // Pass accumulated raw response to success callback
+                    onSuccess?.(accumulatedResponseForHistory);
+                  } catch (e) {
+                    Logger.warn(
+                      `${apiName}: Error during stream close/onSuccess:`,
+                      e,
+                    );
                     /* Might already be closed/errored */
                   }
                 },
                 error: (error) => {
                   if (requestAbortedOrFinished || !streamController) return;
                   requestAbortedOrFinished = true;
-                  Logger.error(`${apiName}: Streaming error received:`, error);
+                  signal?.removeEventListener("abort", abortHandler);
+                  Logger.error(
+                    `${apiName}: Streaming error received from API call:`,
+                    error,
+                  );
                   try {
+                    // Ensure we propagate the error correctly, especially AbortError
                     streamController.error(error);
-                  } catch (_) {}
+                  } catch (e) {
+                    Logger.warn(
+                      `${apiName}: Error propagating stream error:`,
+                      e,
+                    );
+                  }
                 },
               },
             });
           } catch (error) {
+            // Catch errors during the askOpenRouter call itself (e.g., setup, initial connection)
             if (!requestAbortedOrFinished && streamController) {
               requestAbortedOrFinished = true;
-              Logger.error(
-                `${apiName}: Error during streaming setup/request:`,
-                error,
-              );
+              signal?.removeEventListener("abort", abortHandler);
+              // Don't log AbortError specifically here if it was handled by 'on.error' or the listener
+              if (error.name !== "AbortError") {
+                Logger.error(
+                  `${apiName}: Error during streaming setup/request:`,
+                  error,
+                );
+              }
               try {
                 streamController.error(error);
-              } catch (_) {}
+              } catch (e) {
+                Logger.warn(
+                  `${apiName}: Error setting controller error state:`,
+                  e,
+                );
+              }
             } else if (!streamController) {
               Logger.error(
-                `${apiName}: Stream controller unavailable during error:`,
+                `${apiName}: Stream controller unavailable during setup error:`,
                 error,
               );
             }
+            // If already aborted/finished, the error was likely handled by 'on.error' or the listener
           }
         },
         cancel: (reason) => {
@@ -564,6 +787,7 @@
             reason,
           );
           requestAbortedOrFinished = true;
+          // No need to explicitly abort signal here, cancellation originates from consumer
         },
       });
       return stream;
@@ -574,53 +798,93 @@
       if (typeof monitorCallback !== "function") return;
       try {
         const monitorTarget = {
-          addEventListener: (type, listener) => {
-            if (type === "downloadprogress" && typeof listener === "function") {
-              setTimeout(
-                () =>
-                  listener(
-                    new ProgressEvent("downloadprogress", {
-                      loaded: 0,
-                      total: 1,
-                    }),
-                  ),
-                5,
-              );
-              setTimeout(
-                () =>
-                  listener(
-                    new ProgressEvent("downloadprogress", {
-                      loaded: 1,
-                      total: 1,
-                    }),
-                  ),
-                10,
-              );
+          _listeners: {}, // Store listeners
+          addEventListener: function (type, listener) {
+            if (typeof listener !== "function") return;
+            if (!this._listeners[type]) {
+              this._listeners[type] = [];
             }
+            this._listeners[type].push(listener);
+          },
+          removeEventListener: function (type, listener) {
+            // Add removeEventListener
+            if (!this._listeners[type]) return;
+            this._listeners[type] = this._listeners[type].filter(
+              (l) => l !== listener,
+            );
+          },
+          dispatchEvent: function (event) {
+            // Helper to dispatch
+            if (!this._listeners[event.type]) return;
+            this._listeners[event.type].forEach((listener) => {
+              try {
+                listener.call(this, event); // Call listener
+              } catch (e) {
+                Logger.error(
+                  `Error in monitor event listener (${event.type}):`,
+                  e,
+                );
+              }
+            });
           },
         };
-        monitorCallback(monitorTarget);
+        monitorCallback(monitorTarget); // Pass the target to the user's function
+
+        // Simulate progress after a short delay
+        setTimeout(() => {
+          monitorTarget.dispatchEvent(
+            new ProgressEvent("downloadprogress", {
+              loaded: 0,
+              total: 1,
+              lengthComputable: true, // Spec says it should be computable
+            }),
+          );
+        }, 5);
+
+        setTimeout(() => {
+          monitorTarget.dispatchEvent(
+            new ProgressEvent("downloadprogress", {
+              loaded: 1,
+              total: 1,
+              lengthComputable: true,
+            }),
+          );
+          // Optional: Simulate 'loadend' or similar if the spec requires it
+          // monitorTarget.dispatchEvent(new ProgressEvent("loadend"));
+        }, 50); // Increase delay slightly
       } catch (e) {
-        Logger.error(`Error calling monitor function:`, e);
+        Logger.error(
+          `Error calling monitor function or dispatching events:`,
+          e,
+        );
       }
     },
   };
 
-  let _fetch = window.fetch;
-  Utils.isBlocked(new URL(Config.OPENROUTER_API_BASE_URL).hostname).then(
-    (blocked) => {
+  // --- Fetch Wrapper ---
+  // Decide whether to use GM_fetch or window.fetch based on CSP check
+  let _fetch = window.fetch; // Default to window.fetch
+  let _isGmFetchUsed = false;
+  Utils.isBlocked(new URL(Config.OPENROUTER_API_BASE_URL).hostname)
+    .then((blocked) => {
       if (blocked) {
         if (typeof GM_fetch === "function") {
-          Logger.log(`Using GM_fetch due to potential CSP.`);
+          Logger.log(`Potential CSP detected for OpenRouter. Using GM_fetch.`);
           _fetch = GM_fetch;
+          _isGmFetchUsed = true;
         } else {
           Logger.warn(
-            `GM_fetch not found, using window.fetch despite potential CSP issues.`,
+            `Potential CSP detected for OpenRouter, but GM_fetch is not available. Using window.fetch, requests might fail.`,
           );
         }
+      } else {
+        // Logger.log(`CSP check passed for OpenRouter. Using standard window.fetch.`);
       }
-    },
-  );
+    })
+    .catch((error) => {
+      Logger.error("Error during CSP check:", error);
+      // Proceed with default fetch, but log the error
+    });
 
   // --- Core API Interaction Logic ---
   const CoreAPI = {
@@ -636,11 +900,13 @@
       parameters,
       stream = false,
       signal,
-      on,
+      responseFormat = "markdown", // Receive format here
+      on, // Callbacks: chunk(formattedDelta, formattedAccumulated, rawDelta), finish(formattedFullMessage), error(error)
     }) => {
       if (!apiKey) {
         const error = new APIError(`OpenRouter API Key is not configured.`);
         on?.error?.(error);
+        // Reject the promise returned by this function as well
         return Promise.reject(error);
       }
       if (signal?.aborted) {
@@ -660,25 +926,35 @@
         if (parameters.topK !== undefined) requestBody.top_k = parameters.topK;
       }
 
+      // Use a controller specific to this request for finer-grained cancellation
       const internalController = new AbortController();
       const combinedSignal = signal
         ? AbortSignal.any([signal, internalController.signal])
         : internalController.signal;
       let abortReason = null;
+
+      // Centralized abort handler
       const abortHandler = (event) => {
+        if (internalController.signal.aborted) return; // Already aborted internally
         abortReason =
           event?.reason ?? new DOMException("Operation aborted.", "AbortError");
-        if (!internalController.signal.aborted) {
-          internalController.abort(abortReason);
-        }
+        Logger.warn(
+          `${apiName}: Abort detected. Reason:`,
+          abortReason?.message || "No reason provided",
+        );
+        internalController.abort(abortReason); // Trigger internal abort
+        // No need to call on.error here, it will be handled in catch blocks or stream processing
       };
+
+      // Listen to the external signal if provided
       signal?.addEventListener("abort", abortHandler, { once: true });
 
       // Log the prompt before fetching
       Logger.logPrompt(apiName, messages);
 
+      // Return a promise that handles the entire request lifecycle
       return new Promise(async (resolve, reject) => {
-        let accumulatedResponse = "";
+        let accumulatedRawResponse = ""; // Accumulate raw response for formatting
         const requestOptions = {
           method: "POST",
           headers: {
@@ -689,7 +965,7 @@
             ...(stream && { Accept: "text/event-stream" }),
           },
           body: JSON.stringify(requestBody),
-          signal: combinedSignal,
+          signal: combinedSignal, // Use the combined signal for fetch
         };
 
         try {
@@ -698,39 +974,47 @@
             requestOptions,
           );
 
+          // --- Handle Response Status ---
           if (!response.ok) {
             let errorText = `API Error ${response.status}`;
             let errorDetail = "";
             try {
               const bodyText = await response.text();
-              errorText = `${errorText}: ${bodyText.substring(0, 150)}`;
+              // Be careful not to log sensitive info if body might contain it
+              errorDetail = bodyText.substring(0, 200); // Limit detail length
+              errorText = `${errorText}: ${errorDetail}`;
+              // Try parsing JSON for more specific error message
               try {
                 const jsonError = JSON.parse(bodyText);
-                errorDetail =
-                  jsonError?.error?.message || bodyText.substring(0, 100);
+                errorDetail = jsonError?.error?.message || errorDetail;
               } catch {
-                errorDetail = bodyText.substring(0, 100);
+                /* Ignore JSON parse error */
               }
-            } catch (_) {
-              /* Ignore body reading errors */
+            } catch (bodyError) {
+              errorText += ` (Could not read error body: ${bodyError.message})`;
             }
             const error = new APIError(
-              `${apiName}: ${errorDetail || `OpenRouter request failed with status ${response.status}`}`,
+              `${apiName}: OpenRouter request failed - ${errorDetail || `Status ${response.status}`}`,
               { status: response.status },
             );
             on?.error?.(error);
-            reject(error);
-            return;
+            reject(error); // Reject the main promise
+            return; // Stop processing
           }
 
+          // --- Handle Streaming Response ---
           if (stream) {
-            if (!response.body)
-              throw new APIError("Response body is null for stream.");
+            if (!response.body) {
+              throw new APIError(
+                `${apiName}: Response body is null for stream.`,
+              );
+            }
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             let buffer = "";
 
             while (true) {
+              // Check for abort *before* reading
               if (combinedSignal.aborted) {
                 const error =
                   abortReason ??
@@ -749,11 +1033,12 @@
 
               const { done, value } = await reader.read();
 
+              // Check for abort *after* reading, *before* processing
               if (combinedSignal.aborted) {
                 const error =
                   abortReason ??
                   new DOMException(
-                    "Operation aborted during stream processing.",
+                    "Operation aborted post-read.",
                     "AbortError",
                     { cause: combinedSignal.reason },
                   );
@@ -766,95 +1051,138 @@
               }
 
               if (done) {
-                if (buffer.trim())
-                  Logger.warn(`Remaining buffer at stream end:`, buffer);
-
-                // Format the final accumulated response
+                if (buffer.trim()) {
+                  Logger.warn(
+                    `${apiName}: Remaining buffer at stream end:`,
+                    buffer,
+                  );
+                  // Process remaining buffer as final chunk(s)
+                  const finalDeltas = Utils.parseSSE(buffer + "\n\n"); // Add delimiter for parser
+                  finalDeltas.forEach((delta) => {
+                    accumulatedRawResponse += delta;
+                    const formattedDelta = Utils.formatResponse(
+                      delta,
+                      responseFormat,
+                    );
+                    const formattedAccumulated = Utils.formatResponse(
+                      accumulatedRawResponse,
+                      responseFormat,
+                    );
+                    on?.chunk?.(formattedDelta, formattedAccumulated, delta);
+                  });
+                }
+                // Format the final complete response
                 const formattedFinalResponse = Utils.formatResponse(
-                  accumulatedResponse,
+                  accumulatedRawResponse,
                   responseFormat,
                 );
                 on?.finish?.(formattedFinalResponse);
-                resolve(formattedFinalResponse);
+                resolve(formattedFinalResponse); // Resolve the main promise
                 break;
               }
 
               buffer += decoder.decode(value, { stream: true });
               const eventMessages = buffer.split("\n\n");
-              buffer = eventMessages.pop() || "";
+              buffer = eventMessages.pop() || ""; // Keep incomplete message in buffer
 
               for (const sseMessage of eventMessages) {
                 if (sseMessage.trim()) {
-                  const deltas = Utils.parseSSE(sseMessage + "\n\n");
+                  const deltas = Utils.parseSSE(sseMessage + "\n\n"); // Add delimiter for parser robustness
                   deltas.forEach((delta) => {
-                    accumulatedResponse += delta;
-                    // Format the delta or accumulated response based on expected format
+                    accumulatedRawResponse += delta;
+                    // Format based on expectations
                     const formattedDelta = Utils.formatResponse(
                       delta,
                       responseFormat,
                     );
-                    const formattedAccumulated = accumulated
-                      ? Utils.formatResponse(
-                          accumulatedResponse,
-                          responseFormat,
-                        )
-                      : formattedDelta;
-                    on?.chunk?.(
-                      accumulated ? formattedAccumulated : formattedDelta,
-                      formattedAccumulated,
+                    const formattedAccumulated = Utils.formatResponse(
+                      accumulatedRawResponse,
+                      responseFormat,
                     );
+                    // Provide formatted delta, formatted accumulated, and raw delta to callback
+                    on?.chunk?.(formattedDelta, formattedAccumulated, delta);
                   });
                 }
               }
             }
+            // --- Handle Non-Streaming Response ---
           } else {
-            const jsonResponse = await response.json();
-            const content = jsonResponse?.choices?.[0]?.message?.content;
-            if (typeof content === "string") {
-              accumulatedResponse = content;
-              // Format the content according to expected format
-              const formattedContent = Utils.formatResponse(
-                content,
-                responseFormat,
-              );
-              on?.finish?.(formattedContent);
-              resolve(formattedContent);
-            } else {
+            let responseBodyText = "";
+            try {
+              responseBodyText = await response.text(); // Get text first for better error reporting
+              const jsonResponse = JSON.parse(responseBodyText);
+              const content = jsonResponse?.choices?.[0]?.message?.content;
+
+              if (typeof content === "string") {
+                accumulatedRawResponse = content;
+                // Format the content according to expected format *before* resolving/finishing
+                const formattedContent = Utils.formatResponse(
+                  content,
+                  responseFormat,
+                );
+                on?.finish?.(formattedContent);
+                resolve(formattedContent); // Resolve the main promise
+              } else {
+                Logger.error(
+                  `${apiName}: Invalid non-streaming response structure. Content missing or not string.`,
+                  jsonResponse,
+                );
+                throw new APIError(
+                  `${apiName}: Invalid response structure from OpenRouter (content missing).`,
+                );
+              }
+            } catch (parseError) {
               Logger.error(
-                `Invalid non-streaming response structure:`,
-                jsonResponse,
+                `${apiName}: Failed to parse non-streaming JSON response: ${parseError.message}`,
+                responseBodyText,
               );
               throw new APIError(
-                `${apiName}: Invalid response structure from OpenRouter.`,
+                `${apiName}: Failed to parse response from OpenRouter.`,
+                { cause: parseError },
               );
             }
           }
         } catch (error) {
+          // --- Handle Errors During Fetch/Processing ---
           let finalError = error;
-          if (error.name === "AbortError" || combinedSignal.aborted) {
+          // If the combined signal aborted, ensure we have an AbortError
+          if (combinedSignal.aborted && error.name !== "AbortError") {
             finalError =
               abortReason ??
               new DOMException("Operation aborted.", "AbortError", {
                 cause: combinedSignal.reason ?? error,
               });
           } else if (
-            !(error instanceof APIError || error instanceof QuotaExceededError)
+            !(
+              error instanceof APIError ||
+              error instanceof QuotaExceededError ||
+              error.name === "AbortError"
+            )
           ) {
-            Logger.error(`Unexpected error during API call:`, error);
+            // Wrap unexpected errors
+            Logger.error(
+              `${apiName}: Unexpected error during API call:`,
+              error,
+            );
             finalError = new APIError(
               `${apiName}: Network or processing error: ${error.message}`,
               { cause: error },
             );
           }
+
+          // Ensure the error callback is called and the promise is rejected
           on?.error?.(finalError);
           reject(finalError);
         } finally {
+          // --- Cleanup ---
+          // Remove the specific abort listener for the external signal
+          signal?.removeEventListener("abort", abortHandler);
+          // Ensure internal controller is aborted if not already (e.g., normal completion)
           if (!internalController.signal.aborted) {
             internalController.abort(
               new DOMException("Operation finished or errored.", "AbortError"),
             );
           }
-          signal?.removeEventListener("abort", abortHandler);
         }
       });
     },
@@ -864,23 +1192,29 @@
      * Uses the rate limiter to debounce and limit requests
      */
     askOpenRouter: async ({
-      apiName, // Added for logging
+      apiName, // For logging and keying
       apiKey,
       messages,
       model,
       parameters,
       stream = false,
       signal,
-      on,
+      responseFormat = "markdown", // Pass format down
+      on, // Callbacks passed down
     }) => {
-      // Generate a unique key for this request for debouncing
-      // Using apiName and a hash of the stringified messages for uniqueness
-      const requestKey = `${apiName}-${JSON.stringify(messages).length}`;
+      // Generate a unique key for debouncing. Simple hash of key parts.
+      // Avoid stringifying large messages for performance. Use message count/length hash?
+      // Let's use API name + model + simple message indicator.
+      const messageIndicator =
+        messages.length > 0
+          ? messages[0]?.content?.substring(0, 20)
+          : "no_msgs";
+      const requestKey = `${apiName}-${model}-${messageIndicator}`;
 
       try {
-        // Use the rate limiter to perform the request with debouncing
+        // Use the rate limiter to execute the raw request
         return await apiRateLimiter.execute(
-          // Passing the actual API request function to execute after debouncing
+          // Function to execute: the raw API request
           () =>
             CoreAPI._rawApiRequest({
               apiName,
@@ -890,19 +1224,42 @@
               parameters,
               stream,
               signal,
-              on,
+              responseFormat, // Pass format
+              on, // Pass callbacks
             }),
+          // Debounce key
           requestKey,
+          // Arguments for the function (none needed here as they are bound in the closure)
         );
       } catch (error) {
-        // If rate limit was exceeded, notify
+        // Handle errors specifically from the rate limiter or the request itself
         if (
           error instanceof APIError &&
           error.message.includes("Rate limit exceeded")
         ) {
-          Logger.warn(`${apiName}: ${error.message}`);
+          Logger.warn(
+            `${apiName}: Rate limit exceeded. Request key: ${requestKey}`,
+          );
+          // Ensure the 'on.error' callback is triggered for rate limit errors too
           on?.error?.(error);
+        } else if (error.name === "AbortError") {
+          // Abort errors should also be propagated via on.error if needed
+          on?.error?.(error);
+        } else if (
+          !(error instanceof APIError || error instanceof QuotaExceededError)
+        ) {
+          // Log unexpected errors from the execute wrapper/promise
+          Logger.error(
+            `${apiName}: Unexpected error in askOpenRouter wrapper:`,
+            error,
+          );
+          on?.error?.(
+            new APIError(`askOpenRouter Error: ${error.message}`, {
+              cause: error,
+            }),
+          );
         }
+        // Re-throw the error so the caller knows the operation failed
         throw error;
       }
     },
@@ -920,27 +1277,44 @@
       if (newKey === null) {
         alert("API Key entry cancelled.");
       } else if (newKey === "" && currentKey !== "") {
-        await KeyManager.clearApiKey(false);
+        await KeyManager.clearApiKey(false); // Don't confirm if clearing via prompt
       } else if (newKey !== "" && newKey !== currentKey) {
+        // Basic validation: Check if it looks like an OpenRouter key (sk-or-...)
+        if (!newKey.startsWith("sk-or-")) {
+          alert(
+            "Warning: Key does not start with 'sk-or-'. It might be invalid. Saving anyway.",
+          );
+        }
         await GM_setValue(Config.API_KEY_STORAGE_KEY, newKey);
         openRouterApiKey = newKey;
-        alert("API Key saved. Reload page to apply changes.");
+        alert("API Key saved. Reloading page to apply changes...");
+        window.location.reload(); // Force reload
+      } else if (newKey === "" && currentKey === "") {
+        // No change if prompt was empty and no key existed
+      } else {
+        alert("API Key unchanged."); // Key submitted was the same as current
       }
     },
     clearApiKey: async (confirmFirst = true) => {
-      if (
-        !openRouterApiKey &&
-        !(await GM_getValue(Config.API_KEY_STORAGE_KEY))
-      ) {
-        alert("No API key stored.");
+      const keyExists =
+        openRouterApiKey || (await GM_getValue(Config.API_KEY_STORAGE_KEY));
+      if (!keyExists) {
+        alert("No OpenRouter API key is currently stored.");
         return;
       }
+
       const confirmed =
-        !confirmFirst || confirm("Clear stored OpenRouter API Key?");
+        !confirmFirst ||
+        confirm(
+          "Are you sure you want to clear the stored OpenRouter API Key?",
+        );
       if (confirmed) {
         await GM_deleteValue(Config.API_KEY_STORAGE_KEY);
-        openRouterApiKey = null;
-        alert("API Key cleared. Reload page.");
+        openRouterApiKey = null; // Clear runtime variable
+        alert("OpenRouter API Key cleared. Reloading page...");
+        window.location.reload(); // Force reload
+      } else {
+        alert("API Key clearing cancelled.");
       }
     },
     ensureApiKeyLoaded: async () => {
@@ -952,49 +1326,106 @@
     getOpenRouterKeyDetails: async () => {
       const apiKey = await KeyManager.ensureApiKeyLoaded();
       if (!apiKey) {
-        alert("OpenRouter API Key needed. Set via menu.");
+        alert(
+          "OpenRouter API Key is not set. Please set it using the Tampermonkey menu command.",
+        );
+        // Optionally trigger the prompt?
+        // KeyManager.promptForApiKey();
         return null;
       }
+
       try {
+        // Use a short timeout for this check
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 seconds timeout
+
         const response = await _fetch(Config.OPENROUTER_KEY_CHECK_URL, {
           method: "GET",
           headers: {
             Authorization: `Bearer ${apiKey}`,
-            "HTTP-Referer": Config.YOUR_SITE_URL,
-            "X-Title": Config.YOUR_APP_NAME,
+            "HTTP-Referer": Config.YOUR_SITE_URL, // Could be optional
+            "X-Title": Config.YOUR_APP_NAME, // Could be optional
           },
+          signal: controller.signal,
         });
+
+        clearTimeout(timeoutId); // Clear timeout if fetch returned
+
         if (!response.ok) {
-          const errorText = await response.text();
-          alert(
-            `Error fetching key details (${response.status}): ${errorText.substring(0, 200)}`,
-          );
+          let errorText = `Status ${response.status}`;
+          try {
+            const body = await response.text();
+            errorText += `: ${body.substring(0, 150)}`; // Limit length
+            if (response.status === 401) {
+              errorText =
+                "Invalid API Key (Unauthorized). Please check or reset your key.";
+            }
+          } catch {
+            /* Ignore body read error */
+          }
+          alert(`Error fetching key details: ${errorText}`);
           Logger.error(`API key check failed ${response.status}:`, errorText);
           return null;
         }
+
         const data = await response.json();
-        return data?.data;
+        return data?.data; // Structure might change, be defensive
       } catch (error) {
-        alert(`Network error fetching key details: ${error.message}`);
-        Logger.error(`Network error during key check:`, error);
+        let errorMessage = `Error fetching key details: ${error.message}`;
+        if (error.name === "AbortError") {
+          errorMessage = "Error fetching key details: Request timed out.";
+        } else if (error instanceof TypeError && !_isGmFetchUsed) {
+          // Suggest GM_fetch if TypeError occurs and we are using window.fetch
+          errorMessage +=
+            "\nA TypeError occurred. This might be due to CORS/CSP. If problems persist, ensure GM_fetch is enabled and potentially adjust @connect in the script header.";
+        }
+        alert(errorMessage);
+        Logger.error(`Error during key check:`, error);
         return null;
       }
     },
+
     showKeyStatus: async () => {
       const details = await KeyManager.getOpenRouterKeyDetails();
       if (details) {
         const formatCurrency = (val) =>
-          val !== undefined && val !== null
+          val !== undefined && val !== null && !isNaN(Number(val))
             ? `$${Number(val).toFixed(4)}`
             : "N/A";
         const usage = formatCurrency(details.usage);
-        const limit = formatCurrency(details.limit);
+        const limit = formatCurrency(details.limit) || "Unlimited"; // Show unlimited if null/undefined
         const remaining = formatCurrency(details.limit_remaining);
         const reqLimit = details.rate_limit?.requests ?? "N/A";
         const interval = details.rate_limit?.interval ?? "N/A";
-        alert(
-          `OpenRouter Key:\nLabel: ${details.label || "N/A"}\nUsage: ${usage}\nLimit: ${limit}\nRemaining: ${remaining}\nRate: ${reqLimit} req / ${interval}\nFree Tier: ${details.is_free_tier ? "Yes" : "No"}`,
-        );
+        const isFree =
+          details.is_free_tier === true
+            ? "Yes"
+            : details.is_free_tier === false
+              ? "No"
+              : "N/A";
+
+        // Construct message carefully checking for undefined/null
+        let message = `--- OpenRouter Key Status ---`;
+        message += `\nLabel: ${details.label || "N/A"}`;
+        message += `\nFree Tier: ${isFree}`;
+        if (details.limit !== null && details.limit !== undefined) {
+          // Only show usage/limit/remaining if a limit exists
+          message += `\nUsage: ${usage}`;
+          message += `\nLimit: ${limit}`;
+          message += `\nRemaining: ${remaining}`;
+        } else {
+          message += `\nUsage: ${usage}`;
+          message += `\nLimit: ${limit}`;
+        }
+        if (details.rate_limit) {
+          message += `\nRate Limit: ${reqLimit} req / ${interval}`;
+        } else {
+          message += `\nRate Limit: N/A`;
+        }
+
+        alert(message);
+      } else {
+        // Error message already shown by getOpenRouterKeyDetails
       }
     },
   };
@@ -1006,26 +1437,64 @@
     _model;
     _options;
     _instanceAbortController;
-    _creationSignal;
-    _combinedSignal;
+    _creationSignal; // Signal passed during creation
+    _combinedSignal; // Signal combining creation and instance signals
     _apiName;
+
     constructor(apiName, apiKey, defaultModel, options = {}) {
       this._apiName = apiName;
       this._apiKey = apiKey;
-      this._model = defaultModel;
-      this._options = { ...options };
-      this._creationSignal = options.signal;
+      this._model = defaultModel; // Specific instance might override based on options
+      this._options = { ...options }; // Copy options
+      this._creationSignal = options?.signal;
       this._instanceAbortController = new AbortController();
-      this._combinedSignal = options.signal
-        ? AbortSignal.any([
-            options.signal,
-            this._instanceAbortController.signal,
-          ])
-        : this._instanceAbortController.signal;
-      Utils.simulateMonitorEvents(options.monitor);
-      if (options.expectedContextLanguages || options.outputLanguage) {
+
+      // Combine signals: if the creation signal aborts OR the instance is destroyed, abort.
+      const signalsToCombine = [this._instanceAbortController.signal];
+      if (this._creationSignal) {
+        signalsToCombine.push(this._creationSignal);
+      }
+      // Use AbortSignal.any if available (modern browsers)
+      if (typeof AbortSignal.any === "function") {
+        this._combinedSignal = AbortSignal.any(signalsToCombine);
+      } else {
+        // Fallback: listen to both signals manually (less efficient)
+        this._combinedSignal = this._instanceAbortController.signal; // Start with instance signal
+        const manualAbortHandler = (reason) => {
+          if (!this._instanceAbortController.signal.aborted) {
+            this._instanceAbortController.abort(reason);
+          }
+        };
+        this._creationSignal?.addEventListener(
+          "abort",
+          () => manualAbortHandler(this._creationSignal.reason),
+          { once: true },
+        );
+        // Note: This fallback doesn't perfectly replicate AbortSignal.any's immediate propagation
+        // but is better than only listening to one signal.
+      }
+
+      // Check for immediate abort during creation
+      if (this._combinedSignal.aborted) {
+        const creationReason = this._creationSignal?.reason;
+        const message = `${this._apiName} creation aborted.`;
+        Logger.warn(message, creationReason);
+        // Ensure destroy logic runs even if constructor throws
+        this.destroy();
+        throw creationReason || new DOMException(message, "AbortError");
+      }
+
+      Utils.simulateMonitorEvents(options?.monitor); // Simulate monitor events if requested
+
+      // Log ignored options common across APIs
+      if (options?.expectedContextLanguages) {
         Logger.warn(
-          `${apiName}: Language options (expectedContextLanguages, outputLanguage) are ignored by this emulator.`,
+          `${apiName}: Option 'expectedContextLanguages' is noted but not actively used by the emulator.`,
+        );
+      }
+      if (options?.outputLanguage) {
+        Logger.warn(
+          `${apiName}: Option 'outputLanguage' is noted but not actively used by the emulator (except implicitly in Translator).`,
         );
       }
     }
@@ -1037,119 +1506,168 @@
      */
     clone() {
       Logger.log(`${this._apiName}: Creating clone of instance`);
-      // By default, just create a new instance with the same options
+      // Create a new instance with the same *original* options used for this one.
+      // Pass a new signal if the original clone call provided one, otherwise undefined.
+      // Note: Cloning does not typically propagate the *instance's* abort signal,
+      // it creates a new independent instance. The *creation* signal might be relevant
+      // if the clone operation itself needs to be abortable, but the spec is unclear.
+      // We'll pass the original options (which might include a signal for the clone's creation).
       const clonedInstance = new this.constructor(this._apiKey, {
         ...this._options,
       });
+      // Copy the effective model determined by the constructor
+      clonedInstance._model = this._model;
       return clonedInstance;
     }
+
     get inputQuota() {
+      // Could potentially get model-specific quota later if needed
       return Config.MAX_CONTEXT_TOKENS;
     }
+
     async measureInputUsage(text) {
+      // Basic token estimation
       return Promise.resolve(Utils.tokenize(text));
     }
+
     destroy() {
-      Logger.log(`${this._apiName}: Instance destroy() called.`);
       if (!this._instanceAbortController.signal.aborted) {
+        Logger.log(`${this._apiName}: Instance destroy() called.`);
         this._instanceAbortController.abort(
           new DOMException(
-            `${this._apiName} instance destroyed.`,
+            `${this._apiName} instance explicitly destroyed.`,
             "AbortError",
           ),
         );
       }
+      // Clean up any other resources if needed in future
     }
+
+    // --- Internal API Request Helpers ---
+
+    /** Performs a non-streaming API request */
     async _performApiRequest({ messages, callOptions = {}, parameters = {} }) {
       const operationSignal = callOptions.signal
-        ? AbortSignal.any([this._combinedSignal, callOptions.signal])
+        ? typeof AbortSignal.any === "function"
+          ? AbortSignal.any([this._combinedSignal, callOptions.signal])
+          : this._combinedSignal // Prefer combined signal if call signal present, fallback needs checking AbortSignal.any
         : this._combinedSignal;
+
+      // Check abort before proceeding
       if (operationSignal.aborted) {
-        throw (
-          operationSignal.reason ??
+        const reason =
+          operationSignal.reason ||
           new DOMException(
             `${this._apiName} operation aborted before start.`,
             "AbortError",
-            { cause: operationSignal.reason },
-          )
-        );
+          );
+        Logger.warn(reason.message);
+        throw reason;
       }
+
+      // Determine response format: Call option > Instance option > Default
+      const responseFormat =
+        callOptions.responseFormat || this._options.format || "markdown";
+
+      // Check token quota
       const totalTokens = Utils.calculateTotalTokens(messages);
       if (totalTokens > this.inputQuota) {
-        throw new QuotaExceededError(
+        const error = new QuotaExceededError(
           `${this._apiName}: Input exceeds token limit.`,
           { requested: totalTokens, quota: this.inputQuota },
         );
+        Logger.error(error.message);
+        throw error;
       }
+
       try {
-        let requestError = null;
+        let apiError = null; // Variable to capture error from 'on.error'
         const result = await CoreAPI.askOpenRouter({
           apiName: this._apiName,
           apiKey: this._apiKey,
           messages,
-          model: this._model,
+          model: this._model, // Use the instance's resolved model
           parameters,
           stream: false,
-          signal: operationSignal,
+          signal: operationSignal, // Pass the combined signal
+          responseFormat: responseFormat, // Pass the determined format
           on: {
-            finish: (msg) =>
+            finish: (/* formattedMsg */) =>
               Logger.log(`${this._apiName}: Non-streaming request finished.`),
             error: (err) => {
-              Logger.error(
-                `${this._apiName}: Error during non-streaming request:`,
-                err,
-              );
-              requestError = err;
+              // Don't log AbortError noise here, it's handled below
+              if (err.name !== "AbortError") {
+                Logger.error(
+                  `${this._apiName}: Error reported during non-streaming request:`,
+                  err,
+                );
+              }
+              apiError = err; // Capture the error
             },
           },
         });
-        if (requestError) throw requestError;
 
-        // Format the response based on expected format type
-        const responseFormat = callOptions.responseFormat || "md"; // Default to markdown
-        const formattedResult = Utils.formatResponse(result, responseFormat);
-        return formattedResult;
+        // If 'on.error' captured an error, or if askOpenRouter threw, handle it
+        if (apiError) {
+          throw apiError; // Throw the error reported by the callback
+        }
+
+        // askOpenRouter should have already formatted the result based on responseFormat
+        return result;
       } catch (error) {
+        // Handle errors: AbortError, QuotaExceededError, APIError, or others
         if (error.name === "AbortError" || operationSignal.aborted) {
-          throw operationSignal.reason ?? error;
-        }
-        if (error instanceof QuotaExceededError || error instanceof APIError) {
+          // Throw the specific AbortError reason if available
+          throw operationSignal.reason || error;
+        } else if (
+          error instanceof QuotaExceededError ||
+          error instanceof APIError
+        ) {
+          // Re-throw known API-related errors directly
           throw error;
+        } else {
+          // Wrap unexpected errors
+          Logger.error(
+            `${this._apiName}: Unexpected error during non-streaming API request:`,
+            error,
+          );
+          throw new APIError(
+            `${this._apiName}: Failed to complete operation. ${error.message}`,
+            { cause: error },
+          );
         }
-        Logger.error(
-          `${this._apiName}: Unexpected error performing API request:`,
-          error,
-        );
-        throw new APIError(
-          `${this._apiName}: Failed to complete operation. ${error.message}`,
-          { cause: error },
-        );
       }
     }
+
+    /** Performs a streaming API request */
     _performApiStreamingRequest({
       messages,
       callOptions = {},
       parameters = {},
-      accumulated = false,
-      onSuccess,
+      accumulated = false, // Whether the stream yields accumulated text or deltas
+      onSuccess, // Callback with full raw text on successful completion
     }) {
       const operationSignal = callOptions.signal
-        ? AbortSignal.any([this._combinedSignal, callOptions.signal])
+        ? typeof AbortSignal.any === "function"
+          ? AbortSignal.any([this._combinedSignal, callOptions.signal])
+          : this._combinedSignal
         : this._combinedSignal;
 
-      // Get response format from call options, default to markdown
-      const responseFormat = callOptions.responseFormat || "md";
+      // Determine response format: Call option > Instance option > Default
+      const responseFormat =
+        callOptions.responseFormat || this._options.format || "markdown";
 
+      // CreateApiReadableStream handles quota checking and the CoreAPI call
       return Utils.createApiReadableStream({
         apiName: this._apiName,
         apiKey: this._apiKey,
-        model: this._model,
+        model: this._model, // Use the instance's resolved model
         messages,
         parameters,
-        signal: operationSignal,
+        signal: operationSignal, // Pass the combined signal
         accumulated,
-        responseFormat,
-        onSuccess,
+        responseFormat, // Pass the determined format
+        onSuccess, // Pass the success callback through
       });
     }
   }
@@ -1158,142 +1676,228 @@
 
   class LanguageModelSession extends BaseApiInstance {
     _history;
-    _parameters;
+    _parameters; // Holds temperature, topK for the session
+
     constructor(apiKey, options = {}) {
       super("languageModel", apiKey, Config.DEFAULT_PROMPT_MODEL, options);
-      // Accept temperature, topK (as topP in the API), and systemPrompt directly from options
+
+      // Validate and set session parameters (temperature, topK)
       this._parameters = {
-        temperature:
-          options.temperature !== undefined
-            ? options.temperature
-            : Config.DEFAULT_TEMPERATURE,
-        topK: options.topK !== undefined ? options.topK : Config.DEFAULT_TOP_K,
+        temperature: Config.DEFAULT_TEMPERATURE,
+        topK: Config.DEFAULT_TOP_K,
       };
-      // Temperature validation
-      if (this._parameters.temperature > Config.MAX_TEMPERATURE) {
-        Logger.warn(
-          `languageModel: temperature ${this._parameters.temperature} exceeds maximum of ${Config.MAX_TEMPERATURE}. Using maximum.`,
-        );
-        this._parameters.temperature = Config.MAX_TEMPERATURE;
+      if (options.temperature !== undefined) {
+        if (
+          options.temperature > Config.MAX_TEMPERATURE ||
+          options.temperature < 0
+        ) {
+          Logger.warn(
+            `${this._apiName}: Initial temperature ${options.temperature} out of range [0, ${Config.MAX_TEMPERATURE}]. Clamping.`,
+          );
+          this._parameters.temperature = Math.max(
+            0,
+            Math.min(Config.MAX_TEMPERATURE, options.temperature),
+          );
+        } else {
+          this._parameters.temperature = options.temperature;
+        }
       }
-      // TopK validation
-      if (this._parameters.topK > Config.MAX_TOP_K) {
-        Logger.warn(
-          `languageModel: topK ${this._parameters.topK} exceeds maximum of ${Config.MAX_TOP_K}. Using maximum.`,
-        );
-        this._parameters.topK = Config.MAX_TOP_K;
+      if (options.topK !== undefined) {
+        if (options.topK > Config.MAX_TOP_K || options.topK <= 0) {
+          Logger.warn(
+            `${this._apiName}: Initial topK ${options.topK} out of range (0, ${Config.MAX_TOP_K}]. Clamping.`,
+          );
+          this._parameters.topK = Math.max(
+            1,
+            Math.min(Config.MAX_TOP_K, options.topK),
+          ); // topK > 0
+        } else {
+          this._parameters.topK = options.topK;
+        }
       }
 
+      // Initialize history, considering systemPrompt and initialPrompts
       this._history = this._initializeHistory(options);
+
+      // Check for abort *after* initialization
       if (this._combinedSignal.aborted) {
-        this.destroy();
+        this.destroy(); // Ensure cleanup
         throw (
-          this._creationSignal?.reason ??
-          new DOMException("languageModel creation aborted.", "AbortError", {
-            cause: this._creationSignal?.reason,
-          })
+          this._combinedSignal.reason ||
+          new DOMException("languageModel creation aborted.", "AbortError")
         );
       }
+      Logger.log(
+        `${this._apiName}: Session created. Temp: ${this._parameters.temperature}, TopK: ${this._parameters.topK}, History items: ${this._history.length}`,
+      );
     }
+
+    // --- Initialization Helpers ---
     _initializeHistory(options) {
       const history = [];
       const initial = options.initialPrompts;
+
+      // Validate initialPrompts format
       if (
         initial &&
         (!Array.isArray(initial) ||
-          initial.some((p) => typeof p !== "object" || !p.role || !p.content))
+          initial.some(
+            (p) =>
+              typeof p !== "object" || !p.role || typeof p.content !== "string",
+          ))
       ) {
-        throw new TypeError("Invalid initialPrompts format.");
-      }
-      const systemInInitial = initial?.find((p) => p.role === "system");
-      if (options.systemPrompt && systemInInitial) {
         throw new TypeError(
-          "Cannot provide both systemPrompt option and system role in initialPrompts.",
+          "Invalid initialPrompts format. Expected array of {role: string, content: string}.",
+        );
+      }
+
+      const systemInInitial = initial?.find((p) => p.role === "system");
+      const hasExplicitSystemPrompt =
+        typeof options.systemPrompt === "string" &&
+        options.systemPrompt.length > 0;
+
+      // Ensure system prompt rules are followed
+      if (hasExplicitSystemPrompt && systemInInitial) {
+        throw new TypeError(
+          "Cannot provide both systemPrompt option and a system role message in initialPrompts.",
         );
       }
       if (systemInInitial && initial[0].role !== "system") {
         throw new TypeError(
-          "System role message must be first in initialPrompts.",
+          "If initialPrompts contains a system role message, it must be the first message.",
         );
       }
-      if (options.systemPrompt) {
+
+      // Add system prompt if provided
+      if (hasExplicitSystemPrompt) {
         history.push({ role: "system", content: options.systemPrompt });
       }
+
+      // Add initial prompts (which might include a system prompt if hasExplicitSystemPrompt was false)
       if (initial) {
         history.push(...initial);
       }
+
+      // Validate history structure (e.g., alternating roles if applicable, though the API is flexible)
+      // Basic check: ensure roles are valid ('system', 'user', 'assistant')
+      const validRoles = ["system", "user", "assistant"];
+      if (history.some((msg) => !validRoles.includes(msg.role))) {
+        throw new TypeError(
+          "Invalid role found in initial prompts or system prompt.",
+        );
+      }
+
       return history;
     }
+
+    // --- Input Parsing ---
     _parseInput(input) {
-      if (typeof input === "string") return [{ role: "user", content: input }];
+      if (typeof input === "string") {
+        return [{ role: "user", content: input }];
+      }
       if (Array.isArray(input)) {
+        // Validate format: array of {role: string, content: string}
         if (
           input.some(
-            (msg) => typeof msg !== "object" || !msg.role || !msg.content,
+            (msg) =>
+              typeof msg !== "object" ||
+              !msg.role ||
+              typeof msg.content !== "string",
           )
         ) {
-          throw new TypeError("Input message array needs {role, content}.");
+          throw new TypeError(
+            "Invalid input format. Expected string or array of {role: string, content: string}.",
+          );
         }
+        // Basic role validation for input messages (usually should be 'user')
+        // Allowing 'assistant' might be valid for some use cases, but generally input is from user.
+        // if (input.some(msg => msg.role !== 'user')) {
+        //    Logger.warn("Input array contains non-'user' roles.");
+        // }
         return input;
       }
-      throw new TypeError("Input must be string or message array.");
+      throw new TypeError(
+        "Invalid input type. Expected string or array of {role: string, content: string}.",
+      );
     }
 
-    // Helper method to prepare parameters for API requests, applying per-call options if provided
-    _prepareParameters(callOptions) {
+    // --- Parameter Preparation ---
+    _prepareParameters(callOptions = {}) {
       // Start with session-level parameters
       const parameters = { ...this._parameters };
 
-      // Apply per-call parameters if provided
+      // Apply per-call parameters if provided and valid
       if (callOptions.temperature !== undefined) {
-        parameters.temperature = callOptions.temperature;
-        // Validate temperature
-        if (parameters.temperature > Config.MAX_TEMPERATURE) {
+        if (
+          callOptions.temperature > Config.MAX_TEMPERATURE ||
+          callOptions.temperature < 0
+        ) {
           Logger.warn(
-            `languageModel: temperature ${parameters.temperature} exceeds maximum of ${Config.MAX_TEMPERATURE}. Using maximum.`,
+            `${this._apiName}: Call temperature ${callOptions.temperature} out of range [0, ${Config.MAX_TEMPERATURE}]. Clamping.`,
           );
-          parameters.temperature = Config.MAX_TEMPERATURE;
+          parameters.temperature = Math.max(
+            0,
+            Math.min(Config.MAX_TEMPERATURE, callOptions.temperature),
+          );
+        } else {
+          parameters.temperature = callOptions.temperature;
         }
       }
-
       if (callOptions.topK !== undefined) {
-        parameters.topK = callOptions.topK;
-        // Validate topK
-        if (parameters.topK > Config.MAX_TOP_K) {
+        if (callOptions.topK > Config.MAX_TOP_K || callOptions.topK <= 0) {
           Logger.warn(
-            `languageModel: topK ${parameters.topK} exceeds maximum of ${Config.MAX_TOP_K}. Using maximum.`,
+            `${this._apiName}: Call topK ${callOptions.topK} out of range (0, ${Config.MAX_TOP_K}]. Clamping.`,
           );
-          parameters.topK = Config.MAX_TOP_K;
+          parameters.topK = Math.max(
+            1,
+            Math.min(Config.MAX_TOP_K, callOptions.topK),
+          );
+        } else {
+          parameters.topK = callOptions.topK;
         }
       }
 
       return parameters;
     }
 
-    // Helper method to prepare messages array, considering system prompt in options
-    _prepareMessages(input, callOptions) {
-      const currentUserMessages = this._parseInput(input);
-      let messagesForApi = [...this._history];
+    // --- Message Preparation ---
+    _prepareMessages(input, callOptions = {}) {
+      const currentUserMessages = this._parseInput(input); // Validate and format input
+      let messagesForApi = [...this._history]; // Start with current session history
 
-      // If a per-call systemPrompt is provided, insert it at the beginning (replacing any existing system prompt)
-      if (callOptions.systemPrompt !== undefined) {
-        // Remove any existing system message at the start of history or messages
+      // Handle per-call system prompt
+      if (typeof callOptions.systemPrompt === "string") {
+        // Check if history *already* starts with a system prompt
         if (messagesForApi.length > 0 && messagesForApi[0].role === "system") {
-          messagesForApi = messagesForApi.slice(1);
+          // Replace the existing system prompt
+          messagesForApi[0] = {
+            role: "system",
+            content: callOptions.systemPrompt,
+          };
+          Logger.log(
+            `${this._apiName}: Replacing session system prompt with per-call system prompt.`,
+          );
+        } else {
+          // Prepend the new system prompt
+          messagesForApi.unshift({
+            role: "system",
+            content: callOptions.systemPrompt,
+          });
+          Logger.log(`${this._apiName}: Prepending per-call system prompt.`);
         }
-
-        // Add the new system prompt
-        messagesForApi.unshift({
-          role: "system",
-          content: callOptions.systemPrompt,
-        });
       }
 
-      // Add the user messages
+      // Add the new user message(s)
       messagesForApi.push(...currentUserMessages);
+
+      // Optional: Add logic here to truncate history if it exceeds context limits,
+      // but the quota check in _performApiRequest currently handles the hard limit.
 
       return { messagesForApi, currentUserMessages };
     }
+
+    // --- Public API Methods ---
+
     async prompt(input, callOptions = {}) {
       const { messagesForApi, currentUserMessages } = this._prepareMessages(
         input,
@@ -1301,19 +1905,26 @@
       );
       const parameters = this._prepareParameters(callOptions);
 
+      // Perform the non-streaming request
       const assistantResponse = await this._performApiRequest({
         messages: messagesForApi,
-        callOptions,
+        callOptions, // Pass callOptions for signal, responseFormat etc.
         parameters,
       });
 
+      // Update history *only* on successful completion
       this._history.push(...currentUserMessages, {
         role: "assistant",
-        content: assistantResponse,
+        content: assistantResponse, // Use the raw response for history
       });
-      Logger.log(`languageModel: prompt history updated.`);
+      Logger.log(
+        `${this._apiName}: prompt completed. History updated to ${this._history.length} items.`,
+      );
+
+      // The API returns the formatted response directly from _performApiRequest
       return assistantResponse;
     }
+
     promptStreaming(input, callOptions = {}) {
       const { messagesForApi, currentUserMessages } = this._prepareMessages(
         input,
@@ -1321,42 +1932,52 @@
       );
       const parameters = this._prepareParameters(callOptions);
 
-      let fullResponse = ""; // Needed for history update
+      // Perform the streaming request
+      // Define the onSuccess callback to update history after the stream finishes
+      const updateHistoryOnSuccess = (fullRawResponse) => {
+        // Check if the operation was successful (fullRawResponse might be empty on error/abort)
+        if (typeof fullRawResponse === "string") {
+          this._history.push(...currentUserMessages, {
+            role: "assistant",
+            content: fullRawResponse, // Use the full raw response accumulated by the stream helper
+          });
+          Logger.log(
+            `${this._apiName}: promptStreaming completed. History updated to ${this._history.length} items.`,
+          );
+        } else {
+          // This case shouldn't happen if stream completes successfully, but log if it does
+          Logger.warn(
+            `${this._apiName}: promptStreaming onSuccess callback received non-string response. History not updated for assistant turn.`,
+          );
+          // Still add user messages as they were sent
+          this._history.push(...currentUserMessages);
+        }
+      };
+
+      // Create the stream, passing the history update callback
       return this._performApiStreamingRequest({
         messages: messagesForApi,
-        callOptions,
+        callOptions, // Pass callOptions for signal, responseFormat etc.
         parameters,
-        accumulated: false,
-        onSuccess: () => {
-          // Spec is unclear how history is updated on streaming.
-          // Assuming update after stream completion IF we could capture fullResponse.
-          // This is a limitation in the current ReadableStream handling.
-          // Logger.warn(`languageModel: History update for promptStreaming is currently approximate.`);
-          // This._history.push(...currentUserMessages, { role: "assistant", content: "<STREAMED_RESPONSE_PLACEHOLDER>" });
-
-          // For now, only log the user messages added before the stream started
-          this._history.push(...currentUserMessages);
-          Logger.log(
-            `languageModel: promptStreaming user history updated. Assistant response not added.`,
-          );
-        },
+        accumulated: false, // Prompt stream yields deltas
+        onSuccess: updateHistoryOnSuccess, // Pass the callback
       });
     }
-    // Implementation for countPromptTokens
-    async countPromptTokens(prompt) {
+
+    async countPromptTokens(input) {
+      // Note: This counts tokens for the *input* only, not the whole history.
+      // The spec is slightly ambiguous here. Let's assume it means tokenizing the input provided.
       try {
-        const messagesToCount = this._parseInput(prompt);
+        const messagesToCount = this._parseInput(input); // Parse the input string or array
         const tokenCount = Utils.calculateTotalTokens(messagesToCount);
         return Promise.resolve(tokenCount);
       } catch (error) {
-        Logger.error("countPromptTokens error:", error);
-        // Re-throw or return an error indicator, depending on spec.
-        // Let's re-throw TypeErrors from parsing.
+        Logger.error(`${this._apiName}.countPromptTokens error:`, error);
+        // Re-throw TypeError for invalid input format
         if (error instanceof TypeError) {
           throw error;
         }
-        // For other errors, maybe return -1 or throw a generic error?
-        // Throwing seems more appropriate.
+        // Wrap other errors
         throw new APIError(`Failed to count tokens: ${error.message}`, {
           cause: error,
         });
@@ -1368,17 +1989,15 @@
      * @returns {LanguageModelSession} A new instance with copied configuration and history
      */
     clone() {
-      // Create a new instance with the same options
+      // Use base class clone to handle options, apiKey, model etc.
       const clonedInstance = super.clone();
 
-      // Copy parameters
+      // Deep copy specific session state: parameters and history
       clonedInstance._parameters = { ...this._parameters };
-
-      // Deep copy of history (clone all messages)
-      clonedInstance._history = this._history.map((msg) => ({ ...msg }));
+      clonedInstance._history = this._history.map((msg) => ({ ...msg })); // Deep copy history array
 
       Logger.log(
-        `${this._apiName}: Cloned instance with ${clonedInstance._history.length} history items`,
+        `${this._apiName}: Cloned session. History items: ${clonedInstance._history.length}`,
       );
       return clonedInstance;
     }
@@ -1386,315 +2005,391 @@
 
   class SummarizerInstance extends BaseApiInstance {
     _systemPrompt;
+
     constructor(apiKey, options = {}) {
+      // Summarizer spec options: type, format, length, sharedContext
       super("summarizer", apiKey, Config.DEFAULT_SUMMARIZER_MODEL, options);
-      const type = options.type ?? "key-points";
-      const format = options.format ?? "markdown"; // Summarizer uses format
-      const length = options.length ?? "medium";
+
+      const type = options.type ?? "key-points"; // Default type
+      const format = options.format ?? "markdown"; // Default format influences system prompt and potentially default response format
+      const length = options.length ?? "medium"; // Default length
       const sharedContextSection = Utils.formatSharedContext(
         options.sharedContext,
       );
+
       this._systemPrompt = Config.SUMMARIZER_SYSTEM_PROMPT.replace(
         "{type}",
         type,
       )
-        .replace("{format}", format)
+        .replace("{format}", format) // System prompt requests this format
         .replace("{length}", length)
         .replace("{sharedContextSection}", sharedContextSection);
+
+      // Check for abort *after* initialization
       if (this._combinedSignal.aborted) {
         this.destroy();
         throw (
-          this._creationSignal?.reason ??
-          new DOMException("summarizer creation aborted.", "AbortError", {
-            cause: this._creationSignal?.reason,
-          })
+          this._combinedSignal.reason ||
+          new DOMException("summarizer creation aborted.", "AbortError")
         );
       }
+      Logger.log(
+        `${this._apiName}: Instance created. Type: ${type}, Format: ${format}, Length: ${length}`,
+      );
     }
 
     /**
-     * Creates a clone of this summarizer instance with the same configuration.
-     * @returns {SummarizerInstance} A new instance with the same configuration
+     * Creates a clone of this summarizer instance.
+     * @returns {SummarizerInstance} A new instance with the same configuration.
      */
     clone() {
-      // Create a new instance with the same options
-      const clonedInstance = super.clone();
-
-      // Copy system prompt
+      const clonedInstance = super.clone(); // Handles base options, api key, model
+      // Copy derived state specific to Summarizer
       clonedInstance._systemPrompt = this._systemPrompt;
-
-      Logger.log(
-        `${this._apiName}: Cloned instance with same system prompt configuration`,
-      );
+      Logger.log(`${this._apiName}: Cloned instance.`);
       return clonedInstance;
     }
+
     async summarize(text, callOptions = {}) {
-      if (typeof text !== "string")
-        throw new TypeError("Input 'text' must be a string.");
-      let userPromptContent = `Summarize the text:\n\`\`\`\n${text}\n\`\`\``;
-      if (callOptions.context?.trim()) {
-        userPromptContent += `\n\nContext:\n${callOptions.context.trim()}`;
+      if (typeof text !== "string") {
+        throw new TypeError(
+          `Input 'text' for ${this._apiName}.summarize must be a string.`,
+        );
       }
+
+      let userPromptContent = `Summarize the following text:\n\`\`\`\n${text}\n\`\`\``;
+      if (
+        typeof callOptions.context === "string" &&
+        callOptions.context.trim()
+      ) {
+        userPromptContent += `\n\nAdditional Context:\n${callOptions.context.trim()}`;
+      }
+
       const messages = [
         { role: "system", content: this._systemPrompt },
         { role: "user", content: userPromptContent },
       ];
 
-      // Get format from options or use default based on this instance's format
-      if (!callOptions.responseFormat) {
-        // Set responseFormat directly from format option
-        callOptions.responseFormat = this._options.format || "markdown"; // Default to markdown
-      }
-
-      return this._performApiRequest({ messages, callOptions });
+      // _performApiRequest will handle responseFormat using callOptions.responseFormat falling back to this._options.format
+      return this._performApiRequest({
+        messages,
+        callOptions, // Pass through for signal, responseFormat, etc.
+      });
     }
+
     summarizeStreaming(text, callOptions = {}) {
-      if (typeof text !== "string")
-        throw new TypeError("Input 'text' must be a string.");
-      let userPromptContent = `Summarize the text:\n\`\`\`\n${text}\n\`\`\``;
-      if (callOptions.context?.trim()) {
-        userPromptContent += `\n\nContext:\n${callOptions.context.trim()}`;
+      if (typeof text !== "string") {
+        throw new TypeError(
+          `Input 'text' for ${this._apiName}.summarizeStreaming must be a string.`,
+        );
       }
+
+      let userPromptContent = `Summarize the following text:\n\`\`\`\n${text}\n\`\`\``;
+      if (
+        typeof callOptions.context === "string" &&
+        callOptions.context.trim()
+      ) {
+        userPromptContent += `\n\nAdditional Context:\n${callOptions.context.trim()}`;
+      }
+
       const messages = [
         { role: "system", content: this._systemPrompt },
         { role: "user", content: userPromptContent },
       ];
 
-      // Get format from options or use default based on this instance's format
-      if (!callOptions.responseFormat) {
-        // Set responseFormat directly from format option
-        callOptions.responseFormat = this._options.format || "markdown"; // Default to markdown
-      }
-
-      // Summarizer streams deltas according to latest spec understanding
+      // _performApiStreamingRequest handles responseFormat similarly
+      // Summarizer stream yields deltas based on spec interpretation
       return this._performApiStreamingRequest({
         messages,
-        callOptions,
-        accumulated: false,
+        callOptions, // Pass through for signal, responseFormat, etc.
+        accumulated: false, // Summarizer streams deltas
+        // No specific onSuccess logic needed here beyond base class
       });
     }
   }
 
   class WriterInstance extends BaseApiInstance {
     _systemPrompt;
+
     constructor(apiKey, options = {}) {
       // Writer spec options: tone, length, sharedContext
       super("writer", apiKey, Config.DEFAULT_WRITER_MODEL, options);
+
       const tone = options.tone ?? "neutral";
       const length = options.length ?? "medium";
       const sharedContextSection = Utils.formatSharedContext(
         options.sharedContext,
       );
-      // Note: Writer does NOT use 'format' like Summarizer
+      // Note: Writer spec doesn't mention 'format' at creation, but we might use options.format as default response format.
+
       this._systemPrompt = Config.WRITER_SYSTEM_PROMPT.replace("{tone}", tone)
         .replace("{length}", length)
         .replace("{sharedContextSection}", sharedContextSection);
+
+      // Check for abort *after* initialization
       if (this._combinedSignal.aborted) {
         this.destroy();
         throw (
-          this._creationSignal?.reason ??
-          new DOMException("writer creation aborted.", "AbortError", {
-            cause: this._creationSignal?.reason,
-          })
+          this._combinedSignal.reason ||
+          new DOMException("writer creation aborted.", "AbortError")
         );
       }
+      Logger.log(
+        `${this._apiName}: Instance created. Tone: ${tone}, Length: ${length}`,
+      );
     }
 
     /**
-     * Creates a clone of this writer instance with the same configuration.
-     * @returns {WriterInstance} A new instance with the same configuration
+     * Creates a clone of this writer instance.
+     * @returns {WriterInstance} A new instance with the same configuration.
      */
     clone() {
-      // Create a new instance with the same options
-      const clonedInstance = super.clone();
-
-      // Copy system prompt
+      const clonedInstance = super.clone(); // Handles base options, api key, model
+      // Copy derived state specific to Writer
       clonedInstance._systemPrompt = this._systemPrompt;
-
-      Logger.log(
-        `${this._apiName}: Cloned instance with same system prompt configuration`,
-      );
+      Logger.log(`${this._apiName}: Cloned instance.`);
       return clonedInstance;
     }
+
     async write(taskPrompt, callOptions = {}) {
-      if (typeof taskPrompt !== "string")
-        throw new TypeError("Input 'taskPrompt' must be string.");
-      let userPromptContent = `Writing Task:\n${taskPrompt}`;
-      if (callOptions.context?.trim()) {
-        userPromptContent += `\n\nContext:\n${callOptions.context.trim()}`;
+      if (typeof taskPrompt !== "string") {
+        throw new TypeError(
+          `Input 'taskPrompt' for ${this._apiName}.write must be a string.`,
+        );
       }
+
+      let userPromptContent = `Writing Task:\n${taskPrompt}`;
+      if (
+        typeof callOptions.context === "string" &&
+        callOptions.context.trim()
+      ) {
+        userPromptContent += `\n\nAdditional Context:\n${callOptions.context.trim()}`;
+      }
+
       const messages = [
         { role: "system", content: this._systemPrompt },
         { role: "user", content: userPromptContent },
       ];
 
-      // Get format from options or default
-      if (!callOptions.responseFormat) {
-        callOptions.responseFormat = this._options.format || "markdown"; // Default to markdown
-      }
-
+      // _performApiRequest handles responseFormat
       return this._performApiRequest({ messages, callOptions });
     }
+
     writeStreaming(taskPrompt, callOptions = {}) {
-      if (typeof taskPrompt !== "string")
-        throw new TypeError("Input 'taskPrompt' must be string.");
-      let userPromptContent = `Writing Task:\n${taskPrompt}`;
-      if (callOptions.context?.trim()) {
-        userPromptContent += `\n\nContext:\n${callOptions.context.trim()}`;
+      if (typeof taskPrompt !== "string") {
+        throw new TypeError(
+          `Input 'taskPrompt' for ${this._apiName}.writeStreaming must be a string.`,
+        );
       }
+
+      let userPromptContent = `Writing Task:\n${taskPrompt}`;
+      if (
+        typeof callOptions.context === "string" &&
+        callOptions.context.trim()
+      ) {
+        userPromptContent += `\n\nAdditional Context:\n${callOptions.context.trim()}`;
+      }
+
       const messages = [
         { role: "system", content: this._systemPrompt },
         { role: "user", content: userPromptContent },
       ];
 
-      // Get format from options or default
-      if (!callOptions.responseFormat) {
-        callOptions.responseFormat = this._options.format || "markdown"; // Default to markdown
-      }
-
-      // Writer spec implies streaming the full accumulated text
+      // Writer stream yields accumulated text based on spec interpretation
       return this._performApiStreamingRequest({
         messages,
         callOptions,
-        accumulated: true,
+        accumulated: true, // Writer streams accumulated text
+        // No specific onSuccess logic needed here
       });
     }
   }
 
   class RewriterInstance extends BaseApiInstance {
+    // No specific system prompt stored at creation, built per-call based on instructions.
+    // options.sharedContext is stored in this._options by the base class.
+
     constructor(apiKey, options = {}) {
       // Rewriter spec options: sharedContext (at creation), instructions (at call time)
       super("rewriter", apiKey, Config.DEFAULT_REWRITER_MODEL, options);
+
+      // Check for abort *after* initialization
       if (this._combinedSignal.aborted) {
         this.destroy();
         throw (
-          this._creationSignal?.reason ??
-          new DOMException("rewriter creation aborted.", "AbortError", {
-            cause: this._creationSignal?.reason,
-          })
+          this._combinedSignal.reason ||
+          new DOMException("rewriter creation aborted.", "AbortError")
+        );
+      }
+      Logger.log(`${this._apiName}: Instance created.`);
+      // Note: options.tone and options.length are NOT standard creation options for Rewriter.
+      if (options.tone || options.length) {
+        Logger.warn(
+          `${this._apiName}: 'tone' and 'length' are not standard creation options for Rewriter, they are used as guidelines in the prompt during 'rewrite'/'rewriteStreaming' calls.`,
         );
       }
     }
 
     /**
-     * Creates a clone of this rewriter instance with the same configuration.
-     * @returns {RewriterInstance} A new instance with the same configuration
+     * Creates a clone of this rewriter instance.
+     * @returns {RewriterInstance} A new instance with the same configuration.
      */
     clone() {
-      // For RewriterInstance, the base clone is sufficient as there's no additional state to copy
+      // Base clone is sufficient as Rewriter doesn't have extra derived state beyond options.
       const clonedInstance = super.clone();
-      Logger.log(`${this._apiName}: Cloned instance with same configuration`);
+      Logger.log(`${this._apiName}: Cloned instance.`);
       return clonedInstance;
     }
-    _buildSystemPrompt(
-      instructions,
-      sharedCtx,
-      tone = "neutral",
-      length = "medium",
-    ) {
-      const sharedContextSection = Utils.formatSharedContext(sharedCtx);
-      let instructionsSection = "";
-      if (instructions?.trim()) {
-        instructionsSection = `Instructions:\n${instructions.trim()}`;
-      } else {
-        Logger.warn(`rewriter: Missing instructions for system prompt.`);
-        instructionsSection =
-          "Rewrite the text given the tone, length and context.";
+
+    // Helper to build system prompt dynamically for each call
+    _buildSystemPrompt(callOptions = {}) {
+      const instructions = callOptions.instructions; // Required for rewrite call
+      const sharedCtx = this._options.sharedContext; // From instance creation
+      // Tone/length are guidance, not strict parameters for rewrite itself
+      const tone = callOptions.tone ?? "neutral";
+      const length = callOptions.length ?? "medium";
+
+      if (typeof instructions !== "string" || !instructions.trim()) {
+        // Spec implies instructions are needed, but let's be robust.
+        // Throwing an error might be better according to spec adherence.
+        Logger.warn(
+          `${this._apiName}: Call is missing 'instructions'. Proceeding with generic rewrite prompt.`,
+        );
+        // throw new TypeError(`${this._apiName}: 'instructions' option is required for rewrite/rewriteStreaming.`);
       }
-      // Tone/length aren't formal rewrite params but add to prompt for guidance
+
+      const sharedContextSection = Utils.formatSharedContext(sharedCtx);
+      const instructionsSection = instructions?.trim()
+        ? `${instructions.trim()}`
+        : "Rewrite the text according to the guidelines.";
+
       return Config.REWRITER_SYSTEM_PROMPT.replace(
         "{instructionsSection}",
         instructionsSection,
       )
         .replace("{sharedContextSection}", sharedContextSection)
-        .replace("{tone}", tone)
-        .replace("{length}", length);
+        .replace("{tone}", tone) // Pass tone guideline
+        .replace("{length}", length); // Pass length guideline
     }
-    async rewrite(text, callOptions = {}) {
-      if (typeof text !== "string")
-        throw new TypeError("Input 'text' must be string.");
 
-      // Note: Rewriter call options don't include tone/length per spec, using defaults for prompt guidance
-      const systemPrompt = this._buildSystemPrompt(
-        callOptions.instructions,
-        this._options.sharedContext,
-      );
-      let userPromptContent = `Original Text:\n\`\`\`\n${text}\n\`\`\``;
-      if (callOptions.context?.trim()) {
-        userPromptContent += `\n\nContext:\n${callOptions.context.trim()}`;
+    async rewrite(text, callOptions = {}) {
+      if (typeof text !== "string") {
+        throw new TypeError(
+          `Input 'text' for ${this._apiName}.rewrite must be a string.`,
+        );
       }
+      // Instructions are crucial for rewriter
+      if (
+        typeof callOptions.instructions !== "string" ||
+        !callOptions.instructions.trim()
+      ) {
+        Logger.warn(
+          `${this._apiName}.rewrite called without 'instructions'. Result may be unpredictable.`,
+        );
+        // Consider throwing: throw new TypeError("Missing 'instructions' in callOptions for rewriter.rewrite");
+      }
+
+      const systemPrompt = this._buildSystemPrompt(callOptions);
+
+      let userPromptContent = `Original Text:\n\`\`\`\n${text}\n\`\`\``;
+      if (
+        typeof callOptions.context === "string" &&
+        callOptions.context.trim()
+      ) {
+        userPromptContent += `\n\nAdditional Context:\n${callOptions.context.trim()}`;
+      }
+
       const messages = [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPromptContent },
       ];
-
-      // Get format from options or default
-      if (!callOptions.responseFormat) {
-        callOptions.responseFormat = this._options.format || "markdown"; // Default to markdown
-      }
 
       return this._performApiRequest({ messages, callOptions });
     }
-    rewriteStreaming(text, callOptions = {}) {
-      if (typeof text !== "string")
-        throw new TypeError("Input 'text' must be string.");
 
-      const systemPrompt = this._buildSystemPrompt(
-        callOptions.instructions,
-        this._options.sharedContext,
-      );
-      let userPromptContent = `Original Text:\n\`\`\`\n${text}\n\`\`\``;
-      if (callOptions.context?.trim()) {
-        userPromptContent += `\n\nContext:\n${callOptions.context.trim()}`;
+    rewriteStreaming(text, callOptions = {}) {
+      if (typeof text !== "string") {
+        throw new TypeError(
+          `Input 'text' for ${this._apiName}.rewriteStreaming must be a string.`,
+        );
       }
+      // Instructions check
+      if (
+        typeof callOptions.instructions !== "string" ||
+        !callOptions.instructions.trim()
+      ) {
+        Logger.warn(
+          `${this._apiName}.rewriteStreaming called without 'instructions'. Result may be unpredictable.`,
+        );
+        // Consider throwing: throw new TypeError("Missing 'instructions' in callOptions for rewriter.rewriteStreaming");
+      }
+
+      const systemPrompt = this._buildSystemPrompt(callOptions);
+
+      let userPromptContent = `Original Text:\n\`\`\`\n${text}\n\`\`\``;
+      if (
+        typeof callOptions.context === "string" &&
+        callOptions.context.trim()
+      ) {
+        userPromptContent += `\n\nAdditional Context:\n${callOptions.context.trim()}`;
+      }
+
       const messages = [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPromptContent },
       ];
 
-      // Get format from options or default
-      if (!callOptions.responseFormat) {
-        callOptions.responseFormat = this._options.format || "markdown"; // Default to markdown
-      }
-
-      // Rewriter spec implies streaming the full accumulated text
+      // Rewriter stream yields accumulated text based on spec interpretation
       return this._performApiStreamingRequest({
         messages,
         callOptions,
-        accumulated: true,
+        accumulated: true, // Rewriter streams accumulated text
+        // No specific onSuccess logic needed here
       });
     }
   }
 
   class TranslatorInstance extends BaseApiInstance {
-    _sourceLanguage;
-    _targetLanguage;
+    _sourceLanguage; // BCP 47 code
+    _targetLanguage; // BCP 47 code
     _systemPrompt;
+
     constructor(apiKey, options = {}) {
+      // Validate required language options
       if (
         typeof options.sourceLanguage !== "string" ||
         !options.sourceLanguage
       ) {
-        throw new TypeError(`Missing/invalid 'sourceLanguage'.`);
+        throw new TypeError(
+          `${Config.EMULATED_NAMESPACE}.Translator: Missing or invalid 'sourceLanguage' option.`,
+        );
       }
       if (
         typeof options.targetLanguage !== "string" ||
         !options.targetLanguage
       ) {
-        throw new TypeError(`Missing/invalid 'targetLanguage'.`);
+        throw new TypeError(
+          `${Config.EMULATED_NAMESPACE}.Translator: Missing or invalid 'targetLanguage' option.`,
+        );
       }
-      super("Translator", apiKey, Config.DEFAULT_TRANSLATOR_MODEL, options); // Use 'Translator' for logging clarity
+
+      // Use 'Translator' for logging clarity within the base class
+      super("Translator", apiKey, Config.DEFAULT_TRANSLATOR_MODEL, options);
+
       this._sourceLanguage = options.sourceLanguage;
       this._targetLanguage = options.targetLanguage;
+
+      // Attempt to get human-readable names, fallback to codes if needed
       const sourceLanguageLong = Utils.languageTagToHumanReadable(
         this._sourceLanguage,
-        this._targetLanguage,
-      );
+        "en",
+      ); // Use English for names
       const targetLanguageLong = Utils.languageTagToHumanReadable(
         this._targetLanguage,
-        this._targetLanguage,
+        "en",
       );
 
+      // Build the system prompt
       this._systemPrompt = Config.TRANSLATOR_SYSTEM_PROMPT.replace(
         "{sourceLanguage}",
         this._sourceLanguage,
@@ -1702,134 +2397,224 @@
         .replace("{targetLanguage}", this._targetLanguage)
         .replace("{sourceLanguageLong}", sourceLanguageLong)
         .replace("{targetLanguageLong}", targetLanguageLong);
+
+      // Check for abort *after* initialization
       if (this._combinedSignal.aborted) {
         this.destroy();
         throw (
-          this._creationSignal?.reason ??
-          new DOMException("Translator creation aborted.", "AbortError", {
-            cause: this._creationSignal?.reason,
-          })
+          this._combinedSignal.reason ||
+          new DOMException("Translator creation aborted.", "AbortError")
         );
       }
+      Logger.log(
+        `${this._apiName}: Instance created. Source: ${this._sourceLanguage} (${sourceLanguageLong}), Target: ${this._targetLanguage} (${targetLanguageLong})`,
+      );
+
+      // Translator response format is implicitly plain-text, log warning if format option was provided
+      if (options.format && options.format !== "plain-text") {
+        Logger.warn(
+          `${this._apiName}: 'format' option "${options.format}" provided at creation, but Translator typically outputs plain text. The system prompt requests plain text output.`,
+        );
+      }
+      // Set default format to plain-text for this instance
+      this._options.format = "plain-text";
     }
 
     /**
-     * Creates a clone of this translator instance with the same configuration.
-     * @returns {TranslatorInstance} A new instance with the same configuration
+     * Creates a clone of this translator instance.
+     * @returns {TranslatorInstance} A new instance with the same configuration.
      */
     clone() {
-      // Create a new instance with the same options
-      const clonedInstance = super.clone();
-
-      // Copy specific properties
+      const clonedInstance = super.clone(); // Handles base options, api key, model
+      // Copy derived state specific to Translator
       clonedInstance._sourceLanguage = this._sourceLanguage;
       clonedInstance._targetLanguage = this._targetLanguage;
       clonedInstance._systemPrompt = this._systemPrompt;
-
       Logger.log(
-        `${this._apiName}: Cloned instance with source=${this._sourceLanguage}, target=${this._targetLanguage}`,
+        `${this._apiName}: Cloned instance (Source: ${this._sourceLanguage}, Target: ${this._targetLanguage}).`,
       );
       return clonedInstance;
     }
+
     async translate(text, callOptions = {}) {
-      if (typeof text !== "string")
-        throw new TypeError("Input 'text' must be string.");
-      if (callOptions.context)
+      if (typeof text !== "string") {
+        throw new TypeError(
+          `Input 'text' for ${this._apiName}.translate must be a string.`,
+        );
+      }
+      // Context is ignored for translate per spec understanding
+      if (callOptions.context) {
         Logger.warn(`${this._apiName}.translate: 'context' option is ignored.`);
+      }
+      // Ensure response format is plain-text
+      if (
+        callOptions.responseFormat &&
+        callOptions.responseFormat !== "plain-text"
+      ) {
+        Logger.warn(
+          `${this._apiName}.translate: Overriding responseFormat "${callOptions.responseFormat}" with "plain-text".`,
+        );
+      }
+      callOptions.responseFormat = "plain-text";
+
       const messages = [
         { role: "system", content: this._systemPrompt },
-        { role: "user", content: text },
+        { role: "user", content: text }, // User input is the text to translate
       ];
+
       return this._performApiRequest({ messages, callOptions });
     }
+
     translateStreaming(text, callOptions = {}) {
-      if (typeof text !== "string")
-        throw new TypeError("Input 'text' must be string.");
-      if (callOptions.context)
+      if (typeof text !== "string") {
+        throw new TypeError(
+          `Input 'text' for ${this._apiName}.translateStreaming must be a string.`,
+        );
+      }
+      // Context is ignored
+      if (callOptions.context) {
         Logger.warn(
           `${this._apiName}.translateStreaming: 'context' option is ignored.`,
         );
+      }
+      // Ensure response format is plain-text
+      if (
+        callOptions.responseFormat &&
+        callOptions.responseFormat !== "plain-text"
+      ) {
+        Logger.warn(
+          `${this._apiName}.translateStreaming: Overriding responseFormat "${callOptions.responseFormat}" with "plain-text".`,
+        );
+      }
+      callOptions.responseFormat = "plain-text";
+
       const messages = [
         { role: "system", content: this._systemPrompt },
         { role: "user", content: text },
       ];
-      // Translator streams raw text deltas
+
+      // Translator streams raw text deltas (plain-text)
       return this._performApiStreamingRequest({
         messages,
         callOptions,
-        accumulated: false,
+        accumulated: false, // Stream deltas
+        // No specific onSuccess needed
       });
     }
   }
 
   class LanguageDetectorInstance extends BaseApiInstance {
-    _expectedInputLanguages;
+    _expectedInputLanguages; // Array of BCP 47 codes
+
     constructor(apiKey, options = {}) {
+      // Use 'LanguageDetector' for logging clarity
       super(
         "LanguageDetector",
         apiKey,
         Config.DEFAULT_LANGUAGE_DETECTOR_MODEL,
         options,
-      ); // Use 'LanguageDetector' for logging clarity
-      this._expectedInputLanguages = options.expectedInputLanguages;
-      if (this._expectedInputLanguages) {
-        Logger.warn(
-          `${this._apiName}: 'expectedInputLanguages' option noted but not actively used by AI model in emulation.`,
+      );
+
+      // Store and validate expectedInputLanguages if provided
+      if (options.expectedInputLanguages) {
+        if (
+          !Array.isArray(options.expectedInputLanguages) ||
+          options.expectedInputLanguages.some(
+            (lang) => typeof lang !== "string",
+          )
+        ) {
+          throw new TypeError(
+            `${this._apiName}: 'expectedInputLanguages' must be an array of strings.`,
+          );
+        }
+        this._expectedInputLanguages = [...options.expectedInputLanguages];
+        Logger.log(
+          `${this._apiName}: Instance created with ${this._expectedInputLanguages.length} expected languages. (Note: Emulator model may not actively use this hint).`,
+        );
+      } else {
+        Logger.log(
+          `${this._apiName}: Instance created without expected language hints.`,
         );
       }
+
+      // Check for abort *after* initialization
       if (this._combinedSignal.aborted) {
         this.destroy();
         throw (
-          this._creationSignal?.reason ??
-          new DOMException("LanguageDetector creation aborted.", "AbortError", {
-            cause: this._creationSignal?.reason,
-          })
+          this._combinedSignal.reason ||
+          new DOMException("LanguageDetector creation aborted.", "AbortError")
         );
       }
+      // LanguageDetector implies JSON output, warn if format option provided differently
+      if (options.format && options.format !== "json") {
+        Logger.warn(
+          `${this._apiName}: 'format' option "${options.format}" provided at creation, but LanguageDetector always outputs JSON.`,
+        );
+      }
+      // Set default format to json for this instance
+      this._options.format = "json";
     }
 
     /**
-     * Creates a clone of this language detector instance with the same configuration.
-     * @returns {LanguageDetectorInstance} A new instance with the same configuration
+     * Creates a clone of this language detector instance.
+     * @returns {LanguageDetectorInstance} A new instance with the same configuration.
      */
     clone() {
-      // Create a new instance with the same options
-      const clonedInstance = super.clone();
-
-      // Copy expected input languages
+      const clonedInstance = super.clone(); // Handles base options, api key, model
+      // Copy derived state specific to LanguageDetector
       clonedInstance._expectedInputLanguages = this._expectedInputLanguages
         ? [...this._expectedInputLanguages]
         : undefined;
-
-      Logger.log(
-        `${this._apiName}: Cloned instance with ${
-          this._expectedInputLanguages
-            ? `${this._expectedInputLanguages.length} expected languages`
-            : "no expected languages"
-        }`,
-      );
+      Logger.log(`${this._apiName}: Cloned instance.`);
       return clonedInstance;
     }
+
     async detect(text, callOptions = {}) {
-      if (typeof text !== "string")
-        throw new TypeError("Input 'text' must be string.");
-      if (callOptions.context)
+      if (typeof text !== "string") {
+        throw new TypeError(
+          `Input 'text' for ${this._apiName}.detect must be a string.`,
+        );
+      }
+      // Context is ignored for detect per spec understanding
+      if (callOptions.context) {
         Logger.warn(`${this._apiName}.detect: 'context' option is ignored.`);
+      }
+
+      // Ensure responseFormat is 'json' for the API call
+      if (callOptions.responseFormat && callOptions.responseFormat !== "json") {
+        Logger.warn(
+          `${this._apiName}.detect: Overriding responseFormat "${callOptions.responseFormat}" with "json".`,
+        );
+      }
+      callOptions.responseFormat = "json"; // Force JSON format
+
+      // Construct messages for the model
       const messages = [
         { role: "system", content: Config.LANGUAGE_DETECTOR_SYSTEM_PROMPT },
-        { role: "user", content: text },
+        { role: "user", content: text }, // User input is the text to detect
       ];
-      // Language detector always uses JSON format
+
+      // Perform the API request, expecting a JSON string back
       const responseJsonString = await this._performApiRequest({
         messages,
-        callOptions: { ...callOptions, responseFormat: "json" },
+        callOptions, // Pass through signal etc.
       });
-      let results = [{ detectedLanguage: "und", confidence: 1.0 }];
+
+      // --- Parse and Validate the JSON Response ---
+      let results = [{ detectedLanguage: "und", confidence: 1.0 }]; // Default/fallback result
+
+      if (!responseJsonString || typeof responseJsonString !== "string") {
+        Logger.warn(
+          `${this._apiName}: Received empty or non-string response from API. Using fallback result.`,
+        );
+        return results;
+      }
+
       try {
-        const cleanedJsonString = responseJsonString
-          .trim()
-          .replace(/^```json\s*|\s*```$/g, "");
-        const parsed = JSON.parse(cleanedJsonString);
+        // _performApiRequest should have returned cleaned JSON string
+        const parsed = JSON.parse(responseJsonString);
+
+        // Validate the structure: Array of {detectedLanguage: string, confidence: number}
         if (
           Array.isArray(parsed) &&
           parsed.length > 0 &&
@@ -1838,30 +2623,37 @@
               typeof item === "object" &&
               item !== null &&
               typeof item.detectedLanguage === "string" &&
-              item.detectedLanguage &&
+              item.detectedLanguage.length > 0 && // Ensure non-empty language code
               typeof item.confidence === "number" &&
               item.confidence >= 0 &&
               item.confidence <= 1,
           )
         ) {
+          // Sort by confidence (descending) and normalize
           results = parsed.sort((a, b) => b.confidence - a.confidence);
-
-          results = Utils.normalizeConfidences(results);
+          results = Utils.normalizeConfidences(results); // Normalize confidence scores
         } else {
+          // Log if structure is invalid but parsing succeeded
           Logger.warn(
-            `${this._apiName}: Model response not valid JSON array of results. Using fallback. Response:`,
-            responseJsonString,
+            `${this._apiName}: Model response parsed as JSON but has invalid structure. Using fallback result. Response:`,
+            parsed,
           );
+          // Reset to fallback if structure is wrong
+          results = [{ detectedLanguage: "und", confidence: 1.0 }];
         }
       } catch (parseError) {
+        // Log if JSON parsing failed
         Logger.warn(
-          `${this._apiName}: Failed to parse model JSON response. Using fallback. Error:`,
-          parseError,
-          "Response:",
-          responseJsonString,
+          `${this._apiName}: Failed to parse model JSON response. Using fallback result. Error:`,
+          parseError.message,
+          "Raw Response:",
+          responseJsonString, // Log the raw string that failed parsing
         );
+        // Reset to fallback on parse error
+        results = [{ detectedLanguage: "und", confidence: 1.0 }];
       }
-      return results;
+
+      return results; // Return validated, sorted, and normalized results or fallback
     }
   }
 
@@ -1871,106 +2663,159 @@
     const nsName = Config.EMULATED_NAMESPACE;
 
     if (!nsTarget[nsName]) {
-      nsTarget[nsName] = {};
-      Logger.log(`Created global namespace '${nsName}'`);
+      try {
+        Object.defineProperty(nsTarget, nsName, {
+          value: {},
+          writable: false, // Make the namespace itself non-writable
+          configurable: true, // Allow potential redefinition if needed later (e.g., script update)
+        });
+        Logger.log(`Created global namespace '${nsName}'`);
+      } catch (e) {
+        Logger.error(`Failed to create global namespace '${nsName}':`, e);
+        // Fallback if defineProperty fails (e.g., in very restricted environments)
+        nsTarget[nsName] = nsTarget[nsName] || {};
+      }
     }
     const aiNamespace = nsTarget[nsName];
-    nsTarget[Config.PENDING_PROMISES_KEY] =
-      nsTarget[Config.PENDING_PROMISES_KEY] || {}; // Ensure pending promises object exists
 
+    // Ensure pending promises object exists (used for early create calls)
+    // Use a less common property name to avoid potential collisions
+    const pendingKey = Symbol.for(Config.PENDING_PROMISES_KEY); // Use a Symbol
+    nsTarget[pendingKey] = nsTarget[pendingKey] || {};
+
+    // Factory for creating placeholder objects
     const createPlaceholder = (apiName, isStatic = false) => {
       const placeholder = {
-        availability: async () =>
-          (await KeyManager.ensureApiKeyLoaded())
-            ? isStatic
-              ? "available"
-              : "downloadable"
-            : "unavailable",
-        capabilities: async () => ({
-          available: (await KeyManager.ensureApiKeyLoaded()) ? "readily" : "no",
-        }),
-        create: async (options = {}) => {
-          if (!(await KeyManager.ensureApiKeyLoaded())) {
-            throw new APIError(
-              `${apiName}: Cannot create, API Key not configured.`,
-            );
+        // availability: returns 'available' | 'downloadable' | 'unavailable'
+        availability: async () => {
+          const keyLoaded = await KeyManager.ensureApiKeyLoaded();
+          // Static APIs (Translator, Detector) are 'available' if key exists.
+          // Non-static (model, summarizer etc) require 'download' which we map to 'downloadable'.
+          if (keyLoaded) {
+            return isStatic ? "available" : "downloadable";
+          } else {
+            return "unavailable";
           }
+        },
+        // capabilities: returns object with API features
+        capabilities: async () => {
+          // Basic capabilities common to most emulated APIs
+          const baseCapabilities = {
+            available: (await KeyManager.ensureApiKeyLoaded())
+              ? "readily"
+              : "no",
+            // Add other common capabilities if the spec defines them here
+          };
+          // Add API-specific capabilities later when the real API is initialized
+          return baseCapabilities;
+        },
+        // create: returns a Promise that resolves with the API instance
+        create: async (options = {}) => {
+          // Check key availability *before* returning the promise
+          if (!(await KeyManager.ensureApiKeyLoaded())) {
+            Logger.error(
+              `${apiName}.create called but API Key not configured.`,
+            );
+            // Throw immediately, matching expected behavior for unavailable API
+            throw new APIError(
+              `${apiName}: Cannot create instance, API Key is not configured.`,
+              { name: "NotSupportedError" },
+            ); // Use NotSupportedError? Or stick to APIError? Let's use APIError.
+          }
+
+          // Return a promise that will be resolved/rejected when initializeApis runs
           return new Promise((resolve, reject) => {
-            // Store resolver/rejecter for the real `create` to use later
-            nsTarget[Config.PENDING_PROMISES_KEY][apiName] = {
-              resolve,
-              reject,
-              options,
-            };
+            // Store resolver/rejecter keyed by API name for later use
+            nsTarget[pendingKey][apiName] = { resolve, reject, options };
+            Logger.log(
+              `${apiName}: Placeholder 'create' called, storing promise.`,
+            );
           });
         },
       };
+      // Add placeholder methods specific to certain APIs if needed
+      if (apiName === "Translator" || apiName === "translator") {
+        placeholder.languagePairAvailable = async (options = {}) => {
+          // Basic check: requires key and valid options
+          if (!options?.sourceLanguage || !options?.targetLanguage) {
+            return "unavailable"; // Invalid options
+          }
+          return (await KeyManager.ensureApiKeyLoaded())
+            ? "available"
+            : "unavailable";
+        };
+      }
+
       return placeholder;
     };
 
+    // Define APIs to create placeholders for
     const apisToCreate = [
       {
         name: "languageModel",
-        lower: "languageModel",
         isStatic: false,
         enabled: Config.ENABLE_PROMPT_API,
       },
       {
         name: "summarizer",
-        lower: "summarizer",
         isStatic: false,
         enabled: Config.ENABLE_SUMMARIZER_API,
       },
-      {
-        name: "writer",
-        lower: "writer",
-        isStatic: false,
-        enabled: Config.ENABLE_WRITER_API,
-      },
+      { name: "writer", isStatic: false, enabled: Config.ENABLE_WRITER_API },
       {
         name: "rewriter",
-        lower: "rewriter",
         isStatic: false,
         enabled: Config.ENABLE_REWRITER_API,
       },
+      // Static APIs (use standard capitalization as primary)
       {
         name: "Translator",
-        lower: "translator",
         isStatic: true,
         enabled: Config.ENABLE_TRANSLATOR_API,
-      }, // Handle both cases
+      },
       {
         name: "LanguageDetector",
-        lower: "languageDetector",
         isStatic: true,
         enabled: Config.ENABLE_LANGUAGE_DETECTOR_API,
-      }, // Handle both cases
+      },
     ];
 
-    apisToCreate.forEach(({ name, lower, isStatic, enabled }) => {
+    apisToCreate.forEach(({ name, isStatic, enabled }) => {
       if (enabled) {
-        // Ensure placeholder exists for the primary name (potentially uppercase)
-        if (!aiNamespace[name]) {
+        // Ensure placeholder exists for the primary name (e.g., languageModel, Translator)
+        if (!Object.prototype.hasOwnProperty.call(aiNamespace, name)) {
           aiNamespace[name] = createPlaceholder(name, isStatic);
+          // Logger.log(`Created placeholder for ${name}`);
         }
-        // Ensure placeholder exists for the lowercase name if different
-        if (name !== lower && !aiNamespace[lower]) {
-          aiNamespace[lower] = createPlaceholder(lower, isStatic); // Use lowercase name for tracking promises
+        // Add lowercase aliases for convenience if different (e.g., translator, languageDetector)
+        const lowerName = name.toLowerCase();
+        if (
+          name !== lowerName &&
+          !Object.prototype.hasOwnProperty.call(aiNamespace, lowerName)
+        ) {
+          // Point the lowercase alias to the same placeholder object initially
+          // The real implementation will handle both later.
+          aiNamespace[lowerName] = aiNamespace[name];
+          // Logger.log(`Aliased placeholder ${name} to ${lowerName}`);
         }
       }
     });
 
-    Logger.log(`Placeholders ensured.`);
+    Logger.log(`Placeholders ensured for enabled APIs.`);
   }
 
   // --- Main Initialization ---
   async function initializeApis() {
-    await KeyManager.ensureApiKeyLoaded();
+    await KeyManager.ensureApiKeyLoaded(); // Load key early
+
+    // Register menu commands
     GM_registerMenuCommand(
       "Set OpenRouter API Key",
       KeyManager.promptForApiKey,
     );
-    GM_registerMenuCommand("Clear OpenRouter API Key", KeyManager.clearApiKey);
+    GM_registerMenuCommand("Clear OpenRouter API Key", () =>
+      KeyManager.clearApiKey(true),
+    ); // Ensure confirmation
     GM_registerMenuCommand(
       "Check OpenRouter Key Status",
       KeyManager.showKeyStatus,
@@ -1979,146 +2824,220 @@
     const nsTarget = Config.NAMESPACE_TARGET;
     const nsName = Config.EMULATED_NAMESPACE;
     const aiNamespace = nsTarget[nsName];
-    const pendingPromises = nsTarget[Config.PENDING_PROMISES_KEY] || {};
+    const pendingKey = Symbol.for(Config.PENDING_PROMISES_KEY);
+    const pendingPromises = nsTarget[pendingKey] || {};
 
+    // Factory function to create the actual static API object
     const createApiStatic = (apiName, InstanceClass, isEnabled) => {
       if (!isEnabled) return null;
-      return {
-        availability: async (options = {}) =>
-          (await KeyManager.ensureApiKeyLoaded()) ? "available" : "unavailable", // Simplified
-        capabilities: async () => ({
-          available: (await KeyManager.ensureApiKeyLoaded()) ? "readily" : "no",
-          defaultTemperature: Config.DEFAULT_TEMPERATURE,
-          defaultTopK: Config.DEFAULT_TOP_K,
-          maxTemperature: Config.MAX_TEMPERATURE,
-          maxTopK: Config.MAX_TOP_K,
-        }),
+
+      // This object contains the static methods (`availability`, `capabilities`, `create`)
+      const staticApi = {
+        availability: async (/* options = {} */) => {
+          // Availability depends only on the API key being set
+          return (await KeyManager.ensureApiKeyLoaded())
+            ? "available"
+            : "unavailable";
+          // Note: The original spec had 'downloadable' for non-static APIs.
+          // We map that concept here based on InstanceClass type if needed,
+          // but for the final API, it's just 'available' or 'unavailable'.
+          // Let's align with the simpler 'available'/'unavailable' based on key.
+        },
+        capabilities: async () => {
+          const keyLoaded = await KeyManager.ensureApiKeyLoaded();
+          const baseCaps = {
+            available: keyLoaded ? "readily" : "no",
+            // Add capabilities common to most text models if applicable
+            // These might vary greatly per model, so keep it simple or fetch dynamically?
+            // Let's add the config defaults as potential indicators.
+            defaultTemperature: Config.DEFAULT_TEMPERATURE,
+            defaultTopK: Config.DEFAULT_TOP_K,
+            maxTemperature: Config.MAX_TEMPERATURE,
+            maxTopK: Config.MAX_TOP_K,
+            // Input quota is instance-specific, maybe expose max context here?
+            maxInputTokens: Config.MAX_CONTEXT_TOKENS, // Expose general limit
+          };
+          // Add API-specific capabilities if needed (handled by specialized creators below)
+          return baseCaps;
+        },
         create: async (options = {}) => {
-          const key = await KeyManager.ensureApiKeyLoaded();
-          // Use apiName (which could be upper or lower) to find pending promise
-          const pending = pendingPromises[apiName];
-          if (!key) {
+          const apiKey = await KeyManager.ensureApiKeyLoaded();
+          const pending = pendingPromises[apiName]; // Find pending promise using the exact apiName used in placeholder
+
+          if (!apiKey) {
             const error = new APIError(
-              `${apiName}: Cannot create, API Key not configured.`,
+              `${apiName}: Cannot create instance, API Key is not configured.`,
             );
-            pending?.reject?.(error);
-            if (pending) delete pendingPromises[apiName];
-            throw error;
+            pending?.reject?.(error); // Reject pending promise if any
+            if (pending) delete pendingPromises[apiName]; // Clean up
+            throw error; // Throw error for direct calls
           }
+
           try {
-            const instance = new InstanceClass(key, options);
-            pending?.resolve?.(instance);
-            return instance;
+            // Instantiate the specific API class (e.g., LanguageModelSession)
+            const instance = new InstanceClass(apiKey, options);
+            pending?.resolve?.(instance); // Resolve pending promise
+            Logger.log(`${apiName}: Instance created successfully.`);
+            return instance; // Return instance for direct calls
           } catch (error) {
             Logger.error(`${apiName}: Error during instance creation:`, error);
-            pending?.reject?.(error);
-            throw error; // Rethrow creation error
+            pending?.reject?.(error); // Reject pending promise with creation error
+            // Re-throw the error so the caller knows creation failed
+            // Ensure it's an error object
+            if (!(error instanceof Error)) {
+              throw new APIError(`Instance creation failed: ${error}`, {
+                cause: error,
+              });
+            }
+            throw error;
           } finally {
-            if (pending && pendingPromises[apiName])
-              delete pendingPromises[apiName]; // Clean up processed promise
+            // Clean up the pending promise entry regardless of success/failure
+            if (pending && pendingPromises[apiName]) {
+              delete pendingPromises[apiName];
+            }
           }
         },
       };
+      return staticApi;
     };
 
+    // Specialized creator for Translator to add languagePairAvailable
     const createTranslatorApi = (apiName, InstanceClass, isEnabled) => {
       if (!isEnabled) return null;
       const baseApi = createApiStatic(apiName, InstanceClass, isEnabled);
 
       if (baseApi) {
-        // Add translator-specific capabilities
+        // Add translator-specific capabilities function
         const originalCapabilities = baseApi.capabilities;
         baseApi.capabilities = async () => {
-          const baseCapabilities = await originalCapabilities();
-          return {
-            ...baseCapabilities,
-            languagePairAvailable: baseApi.languagePairAvailable,
-          };
+          const caps = await originalCapabilities();
+          // Add the function itself to capabilities, as per spec examples
+          caps.languagePairAvailable = baseApi.languagePairAvailable; // Add the method reference
+          return caps;
         };
 
-        // Add languagePairAvailable function
+        // Implement languagePairAvailable static method
         baseApi.languagePairAvailable = async (options = {}) => {
-          if (!options?.sourceLanguage || !options?.targetLanguage) {
+          if (
+            typeof options.sourceLanguage !== "string" ||
+            !options.sourceLanguage ||
+            typeof options.targetLanguage !== "string" ||
+            !options.targetLanguage
+          ) {
+            // Spec says return "unavailable" for invalid input
             return "unavailable";
           }
+          // For this emulator, we assume any pair is available if the key is set.
+          // A real implementation might check model capabilities.
           return (await KeyManager.ensureApiKeyLoaded())
             ? "available"
             : "unavailable";
         };
       }
-
       return baseApi;
     };
 
+    // --- Define API Implementations ---
     const apiDefinitions = [
       {
         name: "languageModel",
-        lower: "languageModel",
         InstanceClass: LanguageModelSession,
         enabled: Config.ENABLE_PROMPT_API,
         apiCreator: createApiStatic,
       },
       {
         name: "summarizer",
-        lower: "summarizer",
         InstanceClass: SummarizerInstance,
         enabled: Config.ENABLE_SUMMARIZER_API,
         apiCreator: createApiStatic,
       },
       {
         name: "writer",
-        lower: "writer",
         InstanceClass: WriterInstance,
         enabled: Config.ENABLE_WRITER_API,
         apiCreator: createApiStatic,
       },
       {
         name: "rewriter",
-        lower: "rewriter",
         InstanceClass: RewriterInstance,
         enabled: Config.ENABLE_REWRITER_API,
         apiCreator: createApiStatic,
       },
+      // Static APIs (use standard capitalization)
       {
         name: "Translator",
-        lower: "translator",
         InstanceClass: TranslatorInstance,
         enabled: Config.ENABLE_TRANSLATOR_API,
         apiCreator: createTranslatorApi,
       },
       {
         name: "LanguageDetector",
-        lower: "languageDetector",
         InstanceClass: LanguageDetectorInstance,
         enabled: Config.ENABLE_LANGUAGE_DETECTOR_API,
         apiCreator: createApiStatic,
       },
     ];
 
-    apiDefinitions.forEach(
-      ({ name, lower, InstanceClass, enabled, apiCreator }) => {
-        const staticApi = apiCreator(name, InstanceClass, enabled); // Use primary name for static creator
-        if (staticApi) {
-          // Attach to primary name (e.g., ai.languageModel, ai.Translator)
-          Object.assign(aiNamespace[name], staticApi);
-          // If lowercase name is different, also attach to lowercase (e.g., ai.translator)
-          // Create static methods specifically for the lowercase name as well
-          if (name !== lower) {
-            const staticApiLower = apiCreator(lower, InstanceClass, enabled);
-            if (staticApiLower) {
-              // Ensure the lowercase object exists before assigning
-              if (!aiNamespace[lower]) aiNamespace[lower] = {};
-              Object.assign(aiNamespace[lower], staticApiLower);
+    // --- Assign Implementations to Namespace ---
+    apiDefinitions.forEach(({ name, InstanceClass, enabled, apiCreator }) => {
+      if (enabled) {
+        const staticApiImpl = apiCreator(name, InstanceClass, enabled);
+        if (staticApiImpl) {
+          // Ensure the object exists in the namespace (might be placeholder)
+          if (!aiNamespace[name]) aiNamespace[name] = {};
+          // Assign the actual implementation methods over the placeholder
+          Object.assign(aiNamespace[name], staticApiImpl);
+          Logger.log(`Initialized API: ${name}`);
+
+          // Handle lowercase alias if different
+          const lowerName = name.toLowerCase();
+          if (name !== lowerName) {
+            const staticApiLowerImpl = apiCreator(
+              lowerName,
+              InstanceClass,
+              enabled,
+            ); // Create specific static methods for lowercase name
+            if (staticApiLowerImpl) {
+              if (!aiNamespace[lowerName]) aiNamespace[lowerName] = {};
+              Object.assign(aiNamespace[lowerName], staticApiLowerImpl);
+              Logger.log(`Initialized API alias: ${lowerName}`);
             }
           }
         }
-      },
-    );
+      } else {
+        // If API is disabled, ensure it's removed or explicitly marked unavailable
+        if (aiNamespace[name]) {
+          aiNamespace[name].availability = async () => "unavailable";
+          aiNamespace[name].capabilities = async () => ({ available: "no" });
+          aiNamespace[name].create = async () => {
+            throw new APIError(`${name} API is disabled in configuration.`, {
+              name: "NotSupportedError",
+            });
+          };
+          Logger.log(`API explicitly disabled: ${name}`);
+        }
+        const lowerName = name.toLowerCase();
+        if (name !== lowerName && aiNamespace[lowerName]) {
+          aiNamespace[lowerName].availability = async () => "unavailable";
+          aiNamespace[lowerName].capabilities = async () => ({
+            available: "no",
+          });
+          aiNamespace[lowerName].create = async () => {
+            throw new APIError(
+              `${lowerName} API is disabled in configuration.`,
+              { name: "NotSupportedError" },
+            );
+          };
+          Logger.log(`API alias explicitly disabled: ${lowerName}`);
+        }
+      }
+    });
 
-    let logMessage = `Chrome AI API emulator initialized.`;
+    // --- Final Logging and Cleanup ---
+    let logMessage = `Chrome AI API emulator (v${GM_info.script.version}) initialized.`;
     const enabledApiNames = apiDefinitions
       .filter((api) => api.enabled)
-      .map((api) => api.lower); // Use lowercase names for logging
+      .map((api) => api.name); // Use primary names
     if (enabledApiNames.length > 0) {
       logMessage += ` Enabled APIs: [${enabledApiNames.join(", ")}].`;
       const accessPoint = Object.keys(nsTarget).includes(nsName)
@@ -2126,44 +3045,98 @@
         : `unsafeWindow.${nsName}`;
       logMessage += ` Access via: ${accessPoint}`;
     } else {
-      logMessage += ` No APIs enabled.`;
+      logMessage += ` No APIs enabled in configuration.`;
     }
     Logger.log(logMessage);
 
+    // Check API key status post-initialization
     if (!openRouterApiKey) {
       Logger.warn(
-        `OpenRouter API Key is not set. Use Tampermonkey menu. APIs will fail.`,
+        `OpenRouter API Key is not set. Use the Tampermonkey menu ('Set OpenRouter API Key') to configure it. All API calls will fail until a key is provided.`,
       );
+      // Reject any remaining pending promises due to missing key
       Object.entries(pendingPromises).forEach(([apiName, { reject }]) => {
-        if (reject) reject(new APIError(`${apiName}: API key not configured.`));
+        if (reject)
+          reject(
+            new APIError(
+              `${apiName}: API key not configured at initialization.`,
+            ),
+          );
       });
     } else {
-      Logger.log(`OpenRouter API Key loaded.`);
+      Logger.log(`OpenRouter API Key loaded and ready.`);
+      // Key is loaded, but don't automatically resolve pending promises here.
+      // The 'create' method handles resolving them when called.
     }
 
-    if (nsTarget[Config.PENDING_PROMISES_KEY]) {
-      Object.values(nsTarget[Config.PENDING_PROMISES_KEY]).forEach((p) => {
+    // Clean up the pending promises tracking object from the global scope
+    if (nsTarget[pendingKey]) {
+      // Optionally null out resolvers/rejectors to prevent leaks if script is updated live
+      Object.values(nsTarget[pendingKey]).forEach((p) => {
         p.resolve = null;
         p.reject = null;
       });
-      delete nsTarget[Config.PENDING_PROMISES_KEY];
+      delete nsTarget[pendingKey]; // Remove the tracking object
       Logger.log(`Cleaned up pending promise tracking.`);
     }
   }
 
-  // --- Script Execution ---
-  setupPlaceholders(); // Run immediately
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", () =>
-      initializeApis().catch(handleInitError),
+  // --- Script Execution Start ---
+
+  // 1. Setup Placeholders Immediately (at document-start)
+  try {
+    setupPlaceholders();
+  } catch (e) {
+    console.error(
+      `[${Config.EMULATED_NAMESPACE}] FATAL ERROR during placeholder setup:`,
+      e,
     );
-  } else {
+    // Cannot use Logger here as it might not be initialized
+    alert(
+      `Chrome AI Emulator: Fatal error during initial setup. Check console. Error: ${e.message}`,
+    );
+    return; // Stop script execution if placeholders fail
+  }
+
+  // 2. Initialize Full APIs after DOMContentLoaded
+  function runInitialization() {
     initializeApis().catch(handleInitError);
   }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", runInitialization);
+  } else {
+    // DOM already loaded or interactive
+    runInitialization();
+  }
+
+  // Error handler for the main initialization phase
   function handleInitError(error) {
-    Logger.error(`Fatal error during initialization:`, error);
+    Logger.error(`Fatal error during API initialization:`, error);
     alert(
-      `Chrome AI Emulator: Failed to initialize. Check console. Error: ${error.message}`,
+      `Chrome AI Emulator: Failed to initialize APIs. Check console for details. Error: ${error.message}`,
     );
+    // Mark APIs as unavailable if init fails?
+    const nsTarget = Config.NAMESPACE_TARGET;
+    const nsName = Config.EMULATED_NAMESPACE;
+    if (nsTarget[nsName]) {
+      Object.keys(nsTarget[nsName]).forEach((apiKey) => {
+        if (
+          nsTarget[nsName][apiKey] &&
+          typeof nsTarget[nsName][apiKey] === "object"
+        ) {
+          nsTarget[nsName][apiKey].availability = async () => "unavailable";
+          nsTarget[nsName][apiKey].capabilities = async () => ({
+            available: "no",
+          });
+          nsTarget[nsName][apiKey].create = async () => {
+            throw new APIError(`API initialization failed: ${error.message}`);
+          };
+        }
+      });
+      Logger.warn(
+        "Marked all emulated APIs as unavailable due to initialization error.",
+      );
+    }
   }
 })();
