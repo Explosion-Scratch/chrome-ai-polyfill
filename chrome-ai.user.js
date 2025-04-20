@@ -291,55 +291,57 @@
 
   // --- Utility Functions ---
   const Utils = {
-    /** 
+    /**
      * Formats API response text based on expected format
      * @param {string} text - The text to format
      * @param {string} expecting - Format to convert to: 'json', 'markdown', or 'plain-text'
      * @returns {string} Formatted text
      */
-    formatResponse: function(text, expecting = 'markdown') {
+    formatResponse: function (text, expecting = "markdown") {
       if (!text) return text;
-      
+
       // Helper function to convert markdown to plain text using marked and DOMPurify
       // Assumes libraries are already loaded globally
-      const markdownToPlainText = function(markdown) {
+      const markdownToPlainText = function (markdown) {
         try {
           // Convert markdown to HTML and sanitize
           const html = window.marked.parse(markdown);
           const sanitizedHtml = window.DOMPurify.sanitize(html);
-          
+
           // Convert HTML to plain text
-          const tempDiv = document.createElement('div');
+          const tempDiv = document.createElement("div");
           tempDiv.innerHTML = sanitizedHtml;
-          return tempDiv.textContent || tempDiv.innerText || '';
+          return tempDiv.textContent || tempDiv.innerText || "";
         } catch (error) {
-          Logger.warn(`Error converting markdown to plain text: ${error.message}`);
+          Logger.warn(
+            `Error converting markdown to plain text: ${error.message}`,
+          );
           return markdown; // Return original text if conversion fails
         }
       };
-      
-      switch(expecting.toLowerCase()) {
-        case 'json':
+
+      switch (expecting.toLowerCase()) {
+        case "json":
           // Remove code fences and language tags for JSON
           // Handle both complete and incomplete code blocks
           return text
-            .replace(/^```(?:json|JSON)?\s*/g, '')  // Remove opening fence (case insensitive)
-            .replace(/```\s*$/g, '')                // Remove closing fence
-            .replace(/^```(?:json|JSON)?$/gm, '')    // Remove solitary opening fences
-            .replace(/^```$/gm, '')                  // Remove solitary closing fences
+            .replace(/^```(?:json|JSON)?\s*/g, "") // Remove opening fence (case insensitive)
+            .replace(/```\s*$/g, "") // Remove closing fence
+            .replace(/^```(?:json|JSON)?$/gm, "") // Remove solitary opening fences
+            .replace(/^```$/gm, "") // Remove solitary closing fences
             .trim();
-          
-        case 'plain-text':
+
+        case "plain-text":
           // Use the synchronous markdownToPlainText function
           return markdownToPlainText(text);
-          
-        case 'markdown':
+
+        case "markdown":
         default:
           // Return markdown as-is
           return text;
       }
     },
-  
+
     /** Converts BCP 47 language tag to human-readable language name. */
     languageTagToHumanReadable: function (languageTag, displayLanguage = "en") {
       try {
@@ -453,7 +455,7 @@
       parameters,
       signal,
       accumulated = false,
-      responseFormat = 'md',
+      responseFormat = "md",
       onSuccess,
     }) => {
       if (signal?.aborted) {
@@ -765,9 +767,12 @@
               if (done) {
                 if (buffer.trim())
                   Logger.warn(`Remaining buffer at stream end:`, buffer);
-                
+
                 // Format the final accumulated response
-                const formattedFinalResponse = Utils.formatResponse(accumulatedResponse, responseFormat);
+                const formattedFinalResponse = Utils.formatResponse(
+                  accumulatedResponse,
+                  responseFormat,
+                );
                 on?.finish?.(formattedFinalResponse);
                 resolve(formattedFinalResponse);
                 break;
@@ -783,9 +788,20 @@
                   deltas.forEach((delta) => {
                     accumulatedResponse += delta;
                     // Format the delta or accumulated response based on expected format
-                    const formattedDelta = Utils.formatResponse(delta, responseFormat);
-                    const formattedAccumulated = accumulated ? Utils.formatResponse(accumulatedResponse, responseFormat) : formattedDelta;
-                    on?.chunk?.(accumulated ? formattedAccumulated : formattedDelta, formattedAccumulated);
+                    const formattedDelta = Utils.formatResponse(
+                      delta,
+                      responseFormat,
+                    );
+                    const formattedAccumulated = accumulated
+                      ? Utils.formatResponse(
+                          accumulatedResponse,
+                          responseFormat,
+                        )
+                      : formattedDelta;
+                    on?.chunk?.(
+                      accumulated ? formattedAccumulated : formattedDelta,
+                      formattedAccumulated,
+                    );
                   });
                 }
               }
@@ -796,7 +812,10 @@
             if (typeof content === "string") {
               accumulatedResponse = content;
               // Format the content according to expected format
-              const formattedContent = Utils.formatResponse(content, responseFormat);
+              const formattedContent = Utils.formatResponse(
+                content,
+                responseFormat,
+              );
               on?.finish?.(formattedContent);
               resolve(formattedContent);
             } else {
@@ -1084,9 +1103,9 @@
           },
         });
         if (requestError) throw requestError;
-        
+
         // Format the response based on expected format type
-        const responseFormat = callOptions.responseFormat || 'md'; // Default to markdown
+        const responseFormat = callOptions.responseFormat || "md"; // Default to markdown
         const formattedResult = Utils.formatResponse(result, responseFormat);
         return formattedResult;
       } catch (error) {
@@ -1116,10 +1135,10 @@
       const operationSignal = callOptions.signal
         ? AbortSignal.any([this._combinedSignal, callOptions.signal])
         : this._combinedSignal;
-      
+
       // Get response format from call options, default to markdown
-      const responseFormat = callOptions.responseFormat || 'md';
-      
+      const responseFormat = callOptions.responseFormat || "md";
+
       return Utils.createApiReadableStream({
         apiName: this._apiName,
         apiKey: this._apiKey,
@@ -1419,13 +1438,13 @@
         { role: "system", content: this._systemPrompt },
         { role: "user", content: userPromptContent },
       ];
-      
+
       // Get format from options or use default based on this instance's format
       if (!callOptions.responseFormat) {
         // Set responseFormat directly from format option
-        callOptions.responseFormat = this._options.format || 'markdown'; // Default to markdown
+        callOptions.responseFormat = this._options.format || "markdown"; // Default to markdown
       }
-      
+
       return this._performApiRequest({ messages, callOptions });
     }
     summarizeStreaming(text, callOptions = {}) {
@@ -1439,13 +1458,13 @@
         { role: "system", content: this._systemPrompt },
         { role: "user", content: userPromptContent },
       ];
-      
+
       // Get format from options or use default based on this instance's format
       if (!callOptions.responseFormat) {
         // Set responseFormat directly from format option
-        callOptions.responseFormat = this._options.format || 'markdown'; // Default to markdown
+        callOptions.responseFormat = this._options.format || "markdown"; // Default to markdown
       }
-      
+
       // Summarizer streams deltas according to latest spec understanding
       return this._performApiStreamingRequest({
         messages,
@@ -1507,12 +1526,12 @@
         { role: "system", content: this._systemPrompt },
         { role: "user", content: userPromptContent },
       ];
-      
+
       // Get format from options or default
       if (!callOptions.responseFormat) {
-        callOptions.responseFormat = this._options.format || 'markdown'; // Default to markdown
+        callOptions.responseFormat = this._options.format || "markdown"; // Default to markdown
       }
-      
+
       return this._performApiRequest({ messages, callOptions });
     }
     writeStreaming(taskPrompt, callOptions = {}) {
@@ -1526,12 +1545,12 @@
         { role: "system", content: this._systemPrompt },
         { role: "user", content: userPromptContent },
       ];
-      
+
       // Get format from options or default
       if (!callOptions.responseFormat) {
-        callOptions.responseFormat = this._options.format || 'markdown'; // Default to markdown
+        callOptions.responseFormat = this._options.format || "markdown"; // Default to markdown
       }
-      
+
       // Writer spec implies streaming the full accumulated text
       return this._performApiStreamingRequest({
         messages,
@@ -1578,7 +1597,8 @@
         instructionsSection = `Instructions:\n${instructions.trim()}`;
       } else {
         Logger.warn(`rewriter: Missing instructions for system prompt.`);
-        instructionsSection = "Instructions: Rewrite the text.";
+        instructionsSection =
+          "Rewrite the text given the tone, length and context.";
       }
       // Tone/length aren't formal rewrite params but add to prompt for guidance
       return Config.REWRITER_SYSTEM_PROMPT.replace(
@@ -1592,15 +1612,7 @@
     async rewrite(text, callOptions) {
       if (typeof text !== "string")
         throw new TypeError("Input 'text' must be string.");
-      if (
-        !callOptions ||
-        typeof callOptions.instructions !== "string" ||
-        !callOptions.instructions.trim()
-      ) {
-        throw new TypeError(
-          "Rewriter requires 'instructions' string in options.",
-        );
-      }
+
       // Note: Rewriter call options don't include tone/length per spec, using defaults for prompt guidance
       const systemPrompt = this._buildSystemPrompt(
         callOptions.instructions,
@@ -1614,26 +1626,18 @@
         { role: "system", content: systemPrompt },
         { role: "user", content: userPromptContent },
       ];
-      
+
       // Get format from options or default
       if (!callOptions.responseFormat) {
-        callOptions.responseFormat = this._options.format || 'markdown'; // Default to markdown
+        callOptions.responseFormat = this._options.format || "markdown"; // Default to markdown
       }
-      
+
       return this._performApiRequest({ messages, callOptions });
     }
     rewriteStreaming(text, callOptions) {
       if (typeof text !== "string")
         throw new TypeError("Input 'text' must be string.");
-      if (
-        !callOptions ||
-        typeof callOptions.instructions !== "string" ||
-        !callOptions.instructions.trim()
-      ) {
-        throw new TypeError(
-          "Rewriter requires 'instructions' string in options.",
-        );
-      }
+
       const systemPrompt = this._buildSystemPrompt(
         callOptions.instructions,
         this._options.sharedContext,
@@ -1646,12 +1650,12 @@
         { role: "system", content: systemPrompt },
         { role: "user", content: userPromptContent },
       ];
-      
+
       // Get format from options or default
       if (!callOptions.responseFormat) {
-        callOptions.responseFormat = this._options.format || 'markdown'; // Default to markdown
+        callOptions.responseFormat = this._options.format || "markdown"; // Default to markdown
       }
-      
+
       // Rewriter spec implies streaming the full accumulated text
       return this._performApiStreamingRequest({
         messages,
@@ -1817,7 +1821,7 @@
       // Language detector always uses JSON format
       const responseJsonString = await this._performApiRequest({
         messages,
-        callOptions: { ...callOptions, responseFormat: 'json' },
+        callOptions: { ...callOptions, responseFormat: "json" },
       });
       let results = [{ detectedLanguage: "und", confidence: 1.0 }];
       try {
