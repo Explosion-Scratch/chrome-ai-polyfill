@@ -3,7 +3,7 @@
 // @namespace   mailto:explosionscratch@gmail.com
 // @version     3.1
 // @description Emulates experimental Chrome AI APIs (Prompt, Writing Assistance, Translation, Language Detection) using OpenRouter.
-// @author      Explosion Implosion (Refactored with AI assistance)
+// @author      Explosion Implosion
 // @match       *://*/*
 // @grant       GM_setValue
 // @grant       GM_getValue
@@ -15,6 +15,8 @@
 // @connect     openrouter.ai
 // @run-at      document-start
 // ==/UserScript==
+
+// Disclaimer: AI + my guidance, refactoring, and testing used to create this.
 
 (function () {
   "use strict";
@@ -172,32 +174,32 @@
           `Rate limit exceeded. Maximum ${this.maxRequests} requests per ${this.windowMs / 1000} seconds.`,
         );
       }
-      
+
       // Store for pending promises with their resolvers/rejecters
       if (!this.pendingPromises) {
         this.pendingPromises = new Map();
       }
-      
+
       // If we already have a pending promise for this key, return it
       // but update the function arguments to the latest ones
       if (this.pendingPromises.has(key)) {
         const pendingInfo = this.pendingPromises.get(key);
         pendingInfo.latestArgs = args; // Update to use the latest arguments
-        pendingInfo.latestFn = fn;     // Use the latest function
-        return pendingInfo.promise;     // Return the existing promise
+        pendingInfo.latestFn = fn; // Use the latest function
+        return pendingInfo.promise; // Return the existing promise
       }
-      
+
       // Create a new promise for this operation
       const promise = new Promise((resolve, reject) => {
         const executeLatestCall = () => {
           try {
             const pendingInfo = this.pendingPromises.get(key);
             if (!pendingInfo) return; // Safety check
-            
+
             // Get the latest arguments and function reference
             const latestArgs = pendingInfo.latestArgs;
             const latestFn = pendingInfo.latestFn;
-            
+
             // Record the request and execute with latest args
             this.recordRequest();
             const result = latestFn(...latestArgs);
@@ -210,26 +212,26 @@
             this.debounceTimers.delete(key);
           }
         };
-        
+
         // Store the promise info
         this.pendingPromises.set(key, {
           promise,
           latestArgs: args,
           latestFn: fn,
           resolve,
-          reject
+          reject,
         });
-        
+
         // Clear any existing timer
         if (this.debounceTimers.has(key)) {
           clearTimeout(this.debounceTimers.get(key));
         }
-        
+
         // Set a timer to execute after the debounce period
         const timerId = setTimeout(executeLatestCall, this.debounceMs);
         this.debounceTimers.set(key, timerId);
       });
-      
+
       return promise;
     }
   }
@@ -289,6 +291,55 @@
 
   // --- Utility Functions ---
   const Utils = {
+    /** 
+     * Formats API response text based on expected format
+     * @param {string} text - The text to format
+     * @param {string} expecting - Format to convert to: 'json', 'markdown', or 'plain-text'
+     * @returns {string} Formatted text
+     */
+    formatResponse: function(text, expecting = 'markdown') {
+      if (!text) return text;
+      
+      // Helper function to convert markdown to plain text using marked and DOMPurify
+      // Assumes libraries are already loaded globally
+      const markdownToPlainText = function(markdown) {
+        try {
+          // Convert markdown to HTML and sanitize
+          const html = window.marked.parse(markdown);
+          const sanitizedHtml = window.DOMPurify.sanitize(html);
+          
+          // Convert HTML to plain text
+          const tempDiv = document.createElement('div');
+          tempDiv.innerHTML = sanitizedHtml;
+          return tempDiv.textContent || tempDiv.innerText || '';
+        } catch (error) {
+          Logger.warn(`Error converting markdown to plain text: ${error.message}`);
+          return markdown; // Return original text if conversion fails
+        }
+      };
+      
+      switch(expecting.toLowerCase()) {
+        case 'json':
+          // Remove code fences and language tags for JSON
+          // Handle both complete and incomplete code blocks
+          return text
+            .replace(/^```(?:json|JSON)?\s*/g, '')  // Remove opening fence (case insensitive)
+            .replace(/```\s*$/g, '')                // Remove closing fence
+            .replace(/^```(?:json|JSON)?$/gm, '')    // Remove solitary opening fences
+            .replace(/^```$/gm, '')                  // Remove solitary closing fences
+            .trim();
+          
+        case 'plain-text':
+          // Use the synchronous markdownToPlainText function
+          return markdownToPlainText(text);
+          
+        case 'markdown':
+        default:
+          // Return markdown as-is
+          return text;
+      }
+    },
+  
     /** Converts BCP 47 language tag to human-readable language name. */
     languageTagToHumanReadable: function (languageTag, displayLanguage = "en") {
       try {
@@ -402,6 +453,7 @@
       parameters,
       signal,
       accumulated = false,
+      responseFormat = 'md',
       onSuccess,
     }) => {
       if (signal?.aborted) {
@@ -713,8 +765,11 @@
               if (done) {
                 if (buffer.trim())
                   Logger.warn(`Remaining buffer at stream end:`, buffer);
-                on?.finish?.(accumulatedResponse);
-                resolve(accumulatedResponse);
+                
+                // Format the final accumulated response
+                const formattedFinalResponse = Utils.formatResponse(accumulatedResponse, responseFormat);
+                on?.finish?.(formattedFinalResponse);
+                resolve(formattedFinalResponse);
                 break;
               }
 
@@ -727,7 +782,10 @@
                   const deltas = Utils.parseSSE(sseMessage + "\n\n");
                   deltas.forEach((delta) => {
                     accumulatedResponse += delta;
-                    on?.chunk?.(delta, accumulatedResponse);
+                    // Format the delta or accumulated response based on expected format
+                    const formattedDelta = Utils.formatResponse(delta, responseFormat);
+                    const formattedAccumulated = accumulated ? Utils.formatResponse(accumulatedResponse, responseFormat) : formattedDelta;
+                    on?.chunk?.(accumulated ? formattedAccumulated : formattedDelta, formattedAccumulated);
                   });
                 }
               }
@@ -737,8 +795,10 @@
             const content = jsonResponse?.choices?.[0]?.message?.content;
             if (typeof content === "string") {
               accumulatedResponse = content;
-              on?.finish?.(content);
-              resolve(content);
+              // Format the content according to expected format
+              const formattedContent = Utils.formatResponse(content, responseFormat);
+              on?.finish?.(formattedContent);
+              resolve(formattedContent);
             } else {
               Logger.error(
                 `Invalid non-streaming response structure:`,
@@ -1024,7 +1084,11 @@
           },
         });
         if (requestError) throw requestError;
-        return result;
+        
+        // Format the response based on expected format type
+        const responseFormat = callOptions.responseFormat || 'md'; // Default to markdown
+        const formattedResult = Utils.formatResponse(result, responseFormat);
+        return formattedResult;
       } catch (error) {
         if (error.name === "AbortError" || operationSignal.aborted) {
           throw operationSignal.reason ?? error;
@@ -1052,6 +1116,10 @@
       const operationSignal = callOptions.signal
         ? AbortSignal.any([this._combinedSignal, callOptions.signal])
         : this._combinedSignal;
+      
+      // Get response format from call options, default to markdown
+      const responseFormat = callOptions.responseFormat || 'md';
+      
       return Utils.createApiReadableStream({
         apiName: this._apiName,
         apiKey: this._apiKey,
@@ -1060,6 +1128,7 @@
         parameters,
         signal: operationSignal,
         accumulated,
+        responseFormat,
         onSuccess,
       });
     }
@@ -1350,6 +1419,13 @@
         { role: "system", content: this._systemPrompt },
         { role: "user", content: userPromptContent },
       ];
+      
+      // Get format from options or use default based on this instance's format
+      if (!callOptions.responseFormat) {
+        // Set responseFormat directly from format option
+        callOptions.responseFormat = this._options.format || 'markdown'; // Default to markdown
+      }
+      
       return this._performApiRequest({ messages, callOptions });
     }
     summarizeStreaming(text, callOptions = {}) {
@@ -1363,6 +1439,13 @@
         { role: "system", content: this._systemPrompt },
         { role: "user", content: userPromptContent },
       ];
+      
+      // Get format from options or use default based on this instance's format
+      if (!callOptions.responseFormat) {
+        // Set responseFormat directly from format option
+        callOptions.responseFormat = this._options.format || 'markdown'; // Default to markdown
+      }
+      
       // Summarizer streams deltas according to latest spec understanding
       return this._performApiStreamingRequest({
         messages,
@@ -1424,6 +1507,12 @@
         { role: "system", content: this._systemPrompt },
         { role: "user", content: userPromptContent },
       ];
+      
+      // Get format from options or default
+      if (!callOptions.responseFormat) {
+        callOptions.responseFormat = this._options.format || 'markdown'; // Default to markdown
+      }
+      
       return this._performApiRequest({ messages, callOptions });
     }
     writeStreaming(taskPrompt, callOptions = {}) {
@@ -1437,6 +1526,12 @@
         { role: "system", content: this._systemPrompt },
         { role: "user", content: userPromptContent },
       ];
+      
+      // Get format from options or default
+      if (!callOptions.responseFormat) {
+        callOptions.responseFormat = this._options.format || 'markdown'; // Default to markdown
+      }
+      
       // Writer spec implies streaming the full accumulated text
       return this._performApiStreamingRequest({
         messages,
@@ -1519,6 +1614,12 @@
         { role: "system", content: systemPrompt },
         { role: "user", content: userPromptContent },
       ];
+      
+      // Get format from options or default
+      if (!callOptions.responseFormat) {
+        callOptions.responseFormat = this._options.format || 'markdown'; // Default to markdown
+      }
+      
       return this._performApiRequest({ messages, callOptions });
     }
     rewriteStreaming(text, callOptions) {
@@ -1545,6 +1646,12 @@
         { role: "system", content: systemPrompt },
         { role: "user", content: userPromptContent },
       ];
+      
+      // Get format from options or default
+      if (!callOptions.responseFormat) {
+        callOptions.responseFormat = this._options.format || 'markdown'; // Default to markdown
+      }
+      
       // Rewriter spec implies streaming the full accumulated text
       return this._performApiStreamingRequest({
         messages,
@@ -1707,9 +1814,10 @@
         { role: "system", content: Config.LANGUAGE_DETECTOR_SYSTEM_PROMPT },
         { role: "user", content: text },
       ];
+      // Language detector always uses JSON format
       const responseJsonString = await this._performApiRequest({
         messages,
-        callOptions,
+        callOptions: { ...callOptions, responseFormat: 'json' },
       });
       let results = [{ detectedLanguage: "und", confidence: 1.0 }];
       try {
