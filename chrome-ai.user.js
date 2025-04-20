@@ -55,6 +55,11 @@
     MAX_CONTEXT_TOKENS: 128000, // Note: Specific model limits may be lower
     TOKEN_CHAR_RATIO: 5, // Rough estimate
 
+    // Rate Limiting & Debounce Settings
+    RATE_DEBOUNCE: 5000, // Debounce time in milliseconds
+    RATE_REQUESTS_PER_WINDOW: 10, // Maximum number of requests per window
+    RATE_REQUEST_WINDOW: 30000, // Window size in milliseconds (30 seconds)
+
     // OpenRouter Request Headers
     YOUR_SITE_URL: "about:blank", // Recommended: Replace with your specific site if applicable
     YOUR_APP_NAME: "ChromeAI_API_Emulator_v3.1",
@@ -102,17 +107,135 @@
     Target Language: {targetLanguageLong} (BCP 47: {targetLanguage})
     Output ONLY the translated text in the target language. Do not add any extra information, explanations, greetings, or apologies.${FORCE_COMPLETION_SUFFIX}`.trim(),
 
-    // Language Detector: System prompt instructs model on JSON output format.
+    // Language Detector: System prompt instructs model on JSON output format with minimum 3 languages.
     LANGUAGE_DETECTOR_SYSTEM_PROMPT: `
     You are a language detection assistant. Analyze the user's input text and identify the language(s) present.
     Your response MUST be a valid JSON array of objects, sorted by confidence descending. Each object must have:
     { "detectedLanguage": "BCP 47 code (e.g., 'en', 'fr', 'zh-Hans')", "confidence": number (0.0-1.0) }
+    Try to return at least 3 potential languages.
     If detection fails or text is ambiguous, return ONLY: [{"detectedLanguage": "und", "confidence": 1.0}].
     Do NOT include any text outside the single JSON array response.${FORCE_COMPLETION_SUFFIX}`.trim(),
   });
 
   // --- State Variables ---
   let openRouterApiKey = null; // Loaded during init
+
+  // --- Rate Limiter Implementation ---
+  class RateLimiter {
+    constructor(
+      debounceMs = Config.RATE_DEBOUNCE,
+      maxRequests = Config.RATE_REQUESTS_PER_WINDOW,
+      windowMs = Config.RATE_REQUEST_WINDOW,
+    ) {
+      this.debounceMs = debounceMs;
+      this.maxRequests = maxRequests;
+      this.windowMs = windowMs;
+      this.requestTimestamps = [];
+      this.debounceTimers = new Map();
+    }
+
+    /**
+     * Checks if a request can be made based on the rate limiting window
+     * @returns {boolean} Whether the request would exceed the rate limit
+     */
+    wouldExceedRateLimit() {
+      const now = Date.now();
+      const windowStart = now - this.windowMs;
+
+      // Remove timestamps outside the window
+      this.requestTimestamps = this.requestTimestamps.filter(
+        (time) => time >= windowStart,
+      );
+
+      // Check if we have capacity
+      return this.requestTimestamps.length >= this.maxRequests;
+    }
+
+    /**
+     * Records a new request timestamp
+     */
+    recordRequest() {
+      const now = Date.now();
+      this.requestTimestamps.push(now);
+    }
+
+    /**
+     * Executes a function after debouncing and checking rate limits
+     * @param {Function} fn The function to execute
+     * @param {string} key A unique key to identify this debounce group
+     * @param {Array} args Arguments to pass to the function
+     * @returns {Promise} A promise that resolves with the function result
+     */
+    async execute(fn, key, ...args) {
+      if (this.wouldExceedRateLimit()) {
+        throw new APIError(
+          `Rate limit exceeded. Maximum ${this.maxRequests} requests per ${this.windowMs / 1000} seconds.`,
+        );
+      }
+      
+      // Store for pending promises with their resolvers/rejecters
+      if (!this.pendingPromises) {
+        this.pendingPromises = new Map();
+      }
+      
+      // If we already have a pending promise for this key, return it
+      // but update the function arguments to the latest ones
+      if (this.pendingPromises.has(key)) {
+        const pendingInfo = this.pendingPromises.get(key);
+        pendingInfo.latestArgs = args; // Update to use the latest arguments
+        pendingInfo.latestFn = fn;     // Use the latest function
+        return pendingInfo.promise;     // Return the existing promise
+      }
+      
+      // Create a new promise for this operation
+      const promise = new Promise((resolve, reject) => {
+        const executeLatestCall = () => {
+          try {
+            const pendingInfo = this.pendingPromises.get(key);
+            if (!pendingInfo) return; // Safety check
+            
+            // Get the latest arguments and function reference
+            const latestArgs = pendingInfo.latestArgs;
+            const latestFn = pendingInfo.latestFn;
+            
+            // Record the request and execute with latest args
+            this.recordRequest();
+            const result = latestFn(...latestArgs);
+            resolve(result);
+          } catch (error) {
+            reject(error);
+          } finally {
+            // Clean up
+            this.pendingPromises.delete(key);
+            this.debounceTimers.delete(key);
+          }
+        };
+        
+        // Store the promise info
+        this.pendingPromises.set(key, {
+          promise,
+          latestArgs: args,
+          latestFn: fn,
+          resolve,
+          reject
+        });
+        
+        // Clear any existing timer
+        if (this.debounceTimers.has(key)) {
+          clearTimeout(this.debounceTimers.get(key));
+        }
+        
+        // Set a timer to execute after the debounce period
+        const timerId = setTimeout(executeLatestCall, this.debounceMs);
+        this.debounceTimers.set(key, timerId);
+      });
+      
+      return promise;
+    }
+  }
+
+  // Create a global rate limiter instance
+  const apiRateLimiter = new RateLimiter();
 
   // --- Simple Logger ---
   const Logger = {
@@ -167,31 +290,34 @@
   // --- Utility Functions ---
   const Utils = {
     /** Converts BCP 47 language tag to human-readable language name. */
-    languageTagToHumanReadable: function(languageTag, displayLanguage = 'en') {
+    languageTagToHumanReadable: function (languageTag, displayLanguage = "en") {
       try {
         const displayNames = new Intl.DisplayNames([displayLanguage], {
-          type: 'language',
+          type: "language",
         });
         return displayNames.of(languageTag);
       } catch (e) {
-        Logger.warn(`Could not convert language tag ${languageTag} to human-readable form:`, e);
+        Logger.warn(
+          `Could not convert language tag ${languageTag} to human-readable form:`,
+          e,
+        );
         return languageTag; // Fallback to original tag
       }
     },
-    
+
     /** Normalizes confidence values in language detection results so they sum to 1.0 */
-    normalizeConfidences: function(results) {
+    normalizeConfidences: function (results) {
       if (!Array.isArray(results) || results.length === 0) return results;
-      
+
       const sum = results.reduce((acc, item) => acc + item.confidence, 0);
       if (sum === 0) return results; // Avoid division by zero
-      
-      return results.map(item => ({
+
+      return results.map((item) => ({
         ...item,
-        confidence: Math.round((item.confidence / sum) * 1000) / 1000 // Round to 3 decimal places
+        confidence: Math.round((item.confidence / sum) * 1000) / 1000, // Round to 3 decimal places
       }));
     },
-    
+
     /** Checks for CSP blockage using fetch and SecurityPolicyViolationEvent. @async */
     isBlocked: async function (domain, timeout = 500) {
       const normalizedDomain = domain
@@ -443,8 +569,11 @@
 
   // --- Core API Interaction Logic ---
   const CoreAPI = {
-    /** Central function to make requests to OpenRouter. */
-    askOpenRouter: async ({
+    /**
+     * Makes a raw API request to OpenRouter without rate limiting
+     * This is the internal implementation that handles the actual API call
+     */
+    _rawApiRequest: async ({
       apiName, // Added for logging
       apiKey,
       messages,
@@ -648,6 +777,54 @@
           signal?.removeEventListener("abort", abortHandler);
         }
       });
+    },
+
+    /**
+     * Central function to make rate-limited requests to OpenRouter
+     * Uses the rate limiter to debounce and limit requests
+     */
+    askOpenRouter: async ({
+      apiName, // Added for logging
+      apiKey,
+      messages,
+      model,
+      parameters,
+      stream = false,
+      signal,
+      on,
+    }) => {
+      // Generate a unique key for this request for debouncing
+      // Using apiName and a hash of the stringified messages for uniqueness
+      const requestKey = `${apiName}-${JSON.stringify(messages).length}`;
+
+      try {
+        // Use the rate limiter to perform the request with debouncing
+        return await apiRateLimiter.execute(
+          // Passing the actual API request function to execute after debouncing
+          () =>
+            CoreAPI._rawApiRequest({
+              apiName,
+              apiKey,
+              messages,
+              model,
+              parameters,
+              stream,
+              signal,
+              on,
+            }),
+          requestKey,
+        );
+      } catch (error) {
+        // If rate limit was exceeded, notify
+        if (
+          error instanceof APIError &&
+          error.message.includes("Rate limit exceeded")
+        ) {
+          Logger.warn(`${apiName}: ${error.message}`);
+          on?.error?.(error);
+        }
+        throw error;
+      }
     },
   };
 
@@ -1397,10 +1574,22 @@
       super("Translator", apiKey, Config.DEFAULT_TRANSLATOR_MODEL, options); // Use 'Translator' for logging clarity
       this._sourceLanguage = options.sourceLanguage;
       this._targetLanguage = options.targetLanguage;
+      const sourceLanguageLong = Utils.languageTagToHumanReadable(
+        this._sourceLanguage,
+        this._targetLanguage,
+      );
+      const targetLanguageLong = Utils.languageTagToHumanReadable(
+        this._targetLanguage,
+        this._targetLanguage,
+      );
+
       this._systemPrompt = Config.TRANSLATOR_SYSTEM_PROMPT.replace(
         "{sourceLanguage}",
         this._sourceLanguage,
-      ).replace("{targetLanguage}", this._targetLanguage);
+      )
+        .replace("{targetLanguage}", this._targetLanguage)
+        .replace("{sourceLanguageLong}", sourceLanguageLong)
+        .replace("{targetLanguageLong}", targetLanguageLong);
       if (this._combinedSignal.aborted) {
         this.destroy();
         throw (
@@ -1543,6 +1732,8 @@
           )
         ) {
           results = parsed.sort((a, b) => b.confidence - a.confidence);
+
+          results = Utils.normalizeConfidences(results);
         } else {
           Logger.warn(
             `${this._apiName}: Model response not valid JSON array of results. Using fallback. Response:`,
