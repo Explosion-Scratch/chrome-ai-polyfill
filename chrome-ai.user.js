@@ -18,21 +18,24 @@
 // @run-at      document-start
 // ==/UserScript==
 
-// TODO: Make intermeddiate markdown bullet points not result in headers
-// Disclaimer: AI + my guidance, refactoring, and testing used to create this.
-
 (function () {
   "use strict";
-
   // --- Configuration ---
   const Config = Object.freeze({
     // --- Feature Flags ---
     ENABLE_PROMPT_API: true,
+    TRACE: true, // If true, log detailed function calls for debugging
     ENABLE_SUMMARIZER_API: true,
     ENABLE_WRITER_API: true,
     ENABLE_REWRITER_API: true,
     ENABLE_TRANSLATOR_API: true,
     ENABLE_LANGUAGE_DETECTOR_API: true,
+    // --- Spoofing ---
+    // If true, placeholder APIs will immediately report 'available'/'readily'
+    // before the API key is checked or full initialization completes.
+    // Useful for sites that check availability very early.
+    SPOOF_READY_IMMEDIATELY: true,
+    RUN_IMMEDIATELY: true,
 
     // --- Default and Max Parameter Values ---
     DEFAULT_TEMPERATURE: 0.7,
@@ -189,6 +192,116 @@
     },
   });
 
+  // --- Simple Logger ---
+  const Logger = {
+    log: (message, ...args) =>
+      console.log(`[${Config.EMULATED_NAMESPACE}] ${message}`, ...args),
+    warn: (message, ...args) =>
+      console.warn(`[${Config.EMULATED_NAMESPACE}] ${message}`, ...args),
+    error: (message, ...args) =>
+      console.error(`[${Config.EMULATED_NAMESPACE}] ${message}`, ...args),
+    /**
+     * @param {string} apiName
+     * @param {Array<object>} messages
+     */
+    logPrompt: (apiName, messages) => {
+      try {
+        console.groupCollapsed(
+          `[${Config.EMULATED_NAMESPACE}] API Call: ${apiName} - Prompt Details (Click to expand)`,
+        );
+        console.log("Messages:", JSON.parse(JSON.stringify(messages)));
+      } catch (e) {
+        console.groupCollapsed(
+          `[${Config.EMULATED_NAMESPACE}] API Call: ${apiName} - Prompt Details (Stringified)`,
+        );
+        console.log("Messages (raw):", messages);
+        console.warn("Could not serialize messages for detailed logging:", e);
+      } finally {
+        console.groupEnd();
+      }
+    },
+    /**
+     * Logs function entry and returns functions to log exit/error if tracing is enabled.
+     * @param {string} apiName - Name of the API/class.
+     * @param {string} instanceId - Unique ID of the instance.
+     * @param {string} methodName - Name of the method being called.
+     * @param {Array<any>} args - Arguments passed to the method.
+     * @returns {{ logResult: (result: any) => void, logError: (error: any) => void } | undefined}
+     */
+    funcCall: (apiName, instanceId, methodName, args) => {
+      if (!Config.TRACE) return undefined;
+
+      const callId = Math.random().toString(36).substring(2, 8); // Unique ID for this call
+
+      // Basic argument summarization
+      const summarizeArgs = (argsArray) => {
+        if (!argsArray || argsArray.length === 0) return "";
+        return argsArray
+          .map((arg) => {
+            if (arg === null || arg === undefined) return String(arg);
+            if (typeof arg === "string")
+              return `"${arg.substring(0, 50)}${arg.length > 50 ? "..." : ""}"`;
+            if (typeof arg === "number" || typeof arg === "boolean")
+              return String(arg);
+            if (Array.isArray(arg)) return `[Array(${arg.length})]`;
+            if (typeof arg === "object") {
+              const keys = Object.keys(arg);
+              return `{${keys.slice(0, 3).join(", ")}${keys.length > 3 ? ", ..." : ""}}`;
+            }
+            return typeof arg;
+          })
+          .join(", ");
+      };
+
+      // Basic result summarization
+      const summarizeResult = (result) => {
+        if (result === null || result === undefined) return String(result);
+        if (typeof result === "string")
+          return `"${result.substring(0, 50)}${result.length > 50 ? "..." : ""}"`;
+        if (typeof result === "number" || typeof result === "boolean")
+          return String(result);
+        if (result instanceof ReadableStream) return "[ReadableStream]";
+        if (result instanceof DOMException)
+          return `[DOMException: ${result.name} - ${result.message}]`;
+        if (result instanceof Error) return `[Error: ${result.message}]`;
+        if (Array.isArray(result)) return `[Array(${result.length})]`;
+        if (
+          result.constructor &&
+          result.constructor.name &&
+          result.constructor.name !== "Object"
+        )
+          return `[${result.constructor.name}]`;
+        if (typeof result === "object")
+          return `{${Object.keys(result).slice(0, 3).join(", ")}${Object.keys(result).length > 3 ? "..." : ""}}`;
+        return typeof result;
+      };
+
+      Logger.log(
+        `[TRACE:${callId}] >> ${apiName}#${instanceId}.${methodName}(${summarizeArgs(args)})`,
+      );
+
+      return {
+        logResult: (result) => {
+          if (!Config.TRACE) return;
+          Logger.log(
+            `[TRACE:${callId}] << ${apiName}#${instanceId}.${methodName} returned:`,
+            summarizeResult(result),
+          );
+        },
+        logError: (error) => {
+          if (!Config.TRACE) return;
+          Logger.error(
+            `[TRACE:${callId}] !! ${apiName}#${instanceId}.${methodName} threw:`,
+            error,
+          ); // Log full error
+        },
+      };
+    },
+  };
+
+  const scriptStartTime = performance.now();
+  Logger.log(`Script execution started at ${scriptStartTime.toFixed(2)}ms`);
+
   // --- State Variables ---
   let openRouterApiKey = null; // Loaded during init
 
@@ -309,36 +422,6 @@
   }
 
   const apiRateLimiter = new RateLimiter();
-
-  // --- Simple Logger ---
-  const Logger = {
-    log: (message, ...args) =>
-      console.log(`[${Config.EMULATED_NAMESPACE}] ${message}`, ...args),
-    warn: (message, ...args) =>
-      console.warn(`[${Config.EMULATED_NAMESPACE}] ${message}`, ...args),
-    error: (message, ...args) =>
-      console.error(`[${Config.EMULATED_NAMESPACE}] ${message}`, ...args),
-    /**
-     * @param {string} apiName
-     * @param {Array<object>} messages
-     */
-    logPrompt: (apiName, messages) => {
-      try {
-        console.groupCollapsed(
-          `[${Config.EMULATED_NAMESPACE}] API Call: ${apiName} - Prompt Details (Click to expand)`,
-        );
-        console.log("Messages:", JSON.parse(JSON.stringify(messages)));
-      } catch (e) {
-        console.groupCollapsed(
-          `[${Config.EMULATED_NAMESPACE}] API Call: ${apiName} - Prompt Details (Stringified)`,
-        );
-        console.log("Messages (raw):", messages);
-        console.warn("Could not serialize messages for detailed logging:", e);
-      } finally {
-        console.groupEnd();
-      }
-    },
-  };
 
   // --- Custom Error Classes ---
 
@@ -1505,6 +1588,7 @@
     _creationSignal;
     _combinedSignal;
     _apiName;
+    _instanceId; // Unique ID for tracing
 
     /**
      * @param {string} apiName
@@ -1519,6 +1603,7 @@
       this._options = { ...options };
       this._creationSignal = options?.signal;
       this._instanceAbortController = new AbortController();
+      this._instanceId = Math.random().toString(36).substring(2, 8); // Assign unique ID
 
       const signalsToCombine = [this._instanceAbortController.signal];
       if (this._creationSignal) {
@@ -1568,8 +1653,91 @@
 
       // Check again after potentially async operations within subclass constructors (defensive)
       checkAbort();
+      // --- Trace Wrapper ---
+      if (Config.TRACE) {
+        this._wrapMethodsForTracing();
+      }
     }
 
+    /** @private */
+    _wrapMethodsForTracing() {
+      Logger.log(
+        `[TRACE] Wrapping methods for ${this._apiName}#${this._instanceId}`,
+      );
+      const proto = Object.getPrototypeOf(this);
+      const methodNames = Object.getOwnPropertyNames(proto).filter(
+        (name) =>
+          name !== "constructor" &&
+          typeof this[name] === "function" &&
+          !name.startsWith("_"), // Wrap public methods
+      );
+
+      // Include potentially overridden methods from the instance itself?
+      // For now, primarily focus on prototype methods as that's standard practice.
+
+      methodNames.forEach((methodName) => {
+        const originalMethod = this[methodName];
+
+        // Check if the property is directly on the instance and non-configurable
+        const ownPropDesc = Object.getOwnPropertyDescriptor(this, methodName);
+        if (ownPropDesc && !ownPropDesc.configurable) {
+          Logger.warn(
+            `[TRACE] Cannot wrap non-configurable method ${this._apiName}#${this._instanceId}.${methodName}`,
+          );
+          return; // Skip non-configurable methods
+        }
+
+        // Create the wrapped function
+        const wrappedMethod = function (...args) {
+          const tracer = Logger.funcCall(
+            this._apiName,
+            this._instanceId,
+            methodName,
+            args,
+          );
+          try {
+            const result = originalMethod.apply(this, args);
+
+            if (result instanceof Promise) {
+              return result.then(
+                (res) => {
+                  tracer?.logResult(res);
+                  return res;
+                },
+                (err) => {
+                  tracer?.logError(err);
+                  throw err; // Re-throw error
+                },
+              );
+            } else {
+              tracer?.logResult(result);
+              return result;
+            }
+          } catch (error) {
+            tracer?.logError(error);
+            throw error; // Re-throw error
+          }
+        };
+
+        // Assign the wrapped method back to the instance.
+        // This overrides the prototype method for this specific instance.
+        try {
+          Object.defineProperty(this, methodName, {
+            value: wrappedMethod,
+            writable: true, // Or match original writability? Usually true for methods.
+            enumerable: false, // Methods are typically non-enumerable
+            configurable: true, // Keep configurable to allow potential future changes/unwrapping
+          });
+        } catch (e) {
+          Logger.error(
+            `[TRACE] Failed to wrap method ${this._apiName}#${this._instanceId}.${methodName}:`,
+            e,
+          );
+          // Attempt direct assignment as fallback? Might fail silently.
+          // this[methodName] = wrappedMethod;
+        }
+      });
+    }
     /**
      * @returns {BaseApiInstance} A new instance with the same configuration
      */
@@ -2709,6 +2877,9 @@
       const placeholder = {
         /** @returns {Promise<'available' | 'downloadable' | 'unavailable'>} */
         availability: async () => {
+          if (Config.SPOOF_READY_IMMEDIATELY) {
+            return "available";
+          }
           const keyLoaded = await KeyManager.ensureApiKeyLoaded();
           // 'downloadable' originally meant model needed download, here it maps to non-static APIs needing 'create'
           // For simplicity and closer spec match, let's use 'available' if key exists, 'unavailable' otherwise.
@@ -2716,6 +2887,14 @@
         },
         /** @returns {Promise<object>} */
         capabilities: async () => {
+          if (Config.SPOOF_READY_IMMEDIATELY) {
+            return {
+              available: "readily",
+              maxInputTokens: Config.MAX_CONTEXT_TOKENS,
+              defaultTemperature: Config.DEFAULT_TEMPERATURE,
+              defaultTopK: Config.DEFAULT_TOP_K,
+            };
+          }
           const keyLoaded = await KeyManager.ensureApiKeyLoaded();
           return {
             available: keyLoaded ? "readily" : "no",
@@ -2838,72 +3017,104 @@
     const pendingKey = Symbol.for(Config.PENDING_PROMISES_KEY);
     const pendingPromises = nsTarget[pendingKey] || {};
 
+    /** @private Helper to wrap static API methods for tracing */
+    const wrapStaticMethodForTracing = (
+      apiName,
+      methodName,
+      originalMethod,
+    ) => {
+      if (!Config.TRACE) return originalMethod;
+
+      // Return an async function as most static methods are async
+      return async function (...args) {
+        // Use 'static' as the instance ID for static methods
+        const tracer = Logger.funcCall(apiName, "static", methodName, args);
+        try {
+          // Use apply to preserve context if needed, although less critical for static methods
+          const result = await originalMethod.apply(this, args);
+          tracer?.logResult(result);
+          return result;
+        } catch (error) {
+          tracer?.logError(error);
+          throw error; // Re-throw error
+        }
+      };
+    };
+
     /** @private */
     const createApiStatic = (apiName, InstanceClass, isEnabled) => {
       if (!isEnabled) return null;
 
+      // --- Define Original Logic ---
+      const originalAvailability = async (/* options = {} */) => {
+        return (await KeyManager.ensureApiKeyLoaded())
+          ? "available"
+          : "unavailable";
+      };
+
+      const originalCapabilities = async () => {
+        const keyLoaded = await KeyManager.ensureApiKeyLoaded();
+        return {
+          available: keyLoaded ? "readily" : "no",
+          maxInputTokens: Config.MAX_CONTEXT_TOKENS,
+          defaultTemperature: Config.DEFAULT_TEMPERATURE,
+          defaultTopK: Config.DEFAULT_TOP_K,
+          maxTemperature: Config.MAX_TEMPERATURE,
+          maxTopK: Config.MAX_TOP_K,
+        };
+      };
+
+      const originalCreate = async (options = {}) => {
+        const apiKey = await KeyManager.ensureApiKeyLoaded();
+        const promiseKey = apiName;
+        const pending = pendingPromises[promiseKey];
+
+        if (!apiKey) {
+          const error = new APIError(
+            `${apiName}: Cannot create instance, API Key is not configured.`,
+            { name: "NotSupportedError" },
+          );
+          pending?.reject?.(error);
+          if (pending) delete pendingPromises[promiseKey];
+          throw error;
+        }
+
+        try {
+          const instance = new InstanceClass(apiKey, options);
+          pending?.resolve?.(instance);
+          Logger.log(`${apiName}: Instance created successfully.`);
+          return instance;
+        } catch (error) {
+          Logger.error(`${apiName}: Error during instance creation:`, error);
+          const creationError =
+            error instanceof Error
+              ? error
+              : new APIError(`Instance creation failed: ${error}`, {
+                  cause: error,
+                });
+          pending?.reject?.(creationError);
+          if (pending) delete pendingPromises[promiseKey];
+          throw creationError;
+        } finally {
+          if (pending && pendingPromises[promiseKey]) {
+            delete pendingPromises[promiseKey];
+          }
+        }
+      };
+
+      // --- Wrap and Return ---
       const staticApi = {
-        /** @returns {Promise<'available' | 'unavailable'>} */
-        availability: async (/* options = {} */) => {
-          return (await KeyManager.ensureApiKeyLoaded())
-            ? "available"
-            : "unavailable";
-        },
-        /** @returns {Promise<object>} */
-        capabilities: async () => {
-          const keyLoaded = await KeyManager.ensureApiKeyLoaded();
-          return {
-            available: keyLoaded ? "readily" : "no",
-            maxInputTokens: Config.MAX_CONTEXT_TOKENS,
-            defaultTemperature: Config.DEFAULT_TEMPERATURE,
-            defaultTopK: Config.DEFAULT_TOP_K,
-            maxTemperature: Config.MAX_TEMPERATURE,
-            maxTopK: Config.MAX_TOP_K,
-          };
-        },
-        /**
-         * @param {object} [options={}]
-         * @returns {Promise<BaseApiInstance>}
-         */
-        create: async (options = {}) => {
-          const apiKey = await KeyManager.ensureApiKeyLoaded();
-          // Use the exact apiName used for the placeholder as the key
-          const promiseKey = apiName;
-          const pending = pendingPromises[promiseKey];
-
-          if (!apiKey) {
-            const error = new APIError(
-              `${apiName}: Cannot create instance, API Key is not configured.`,
-              { name: "NotSupportedError" },
-            );
-            pending?.reject?.(error);
-            if (pending) delete pendingPromises[promiseKey];
-            throw error;
-          }
-
-          try {
-            const instance = new InstanceClass(apiKey, options);
-            pending?.resolve?.(instance);
-            Logger.log(`${apiName}: Instance created successfully.`);
-            return instance;
-          } catch (error) {
-            Logger.error(`${apiName}: Error during instance creation:`, error);
-            const creationError =
-              error instanceof Error
-                ? error
-                : new APIError(`Instance creation failed: ${error}`, {
-                    cause: error,
-                  });
-            pending?.reject?.(creationError);
-            if (pending) delete pendingPromises[promiseKey]; // Clean up even on error
-            throw creationError; // Re-throw standardized error
-          } finally {
-            // Redundant cleanup? Should be handled in try/catch. Keep for safety.
-            if (pending && pendingPromises[promiseKey]) {
-              delete pendingPromises[promiseKey];
-            }
-          }
-        },
+        availability: wrapStaticMethodForTracing(
+          apiName,
+          "availability",
+          originalAvailability,
+        ),
+        capabilities: wrapStaticMethodForTracing(
+          apiName,
+          "capabilities",
+          originalCapabilities,
+        ),
+        create: wrapStaticMethodForTracing(apiName, "create", originalCreate),
       };
       return staticApi;
     };
@@ -2911,21 +3122,15 @@
     /** @private */
     const createTranslatorApi = (apiName, InstanceClass, isEnabled) => {
       if (!isEnabled) return null;
+      // Get the base API object with already wrapped methods
       const baseApi = createApiStatic(apiName, InstanceClass, isEnabled);
 
       if (baseApi) {
-        const originalCapabilities = baseApi.capabilities;
-        /** @returns {Promise<object>} */
-        baseApi.capabilities = async () => {
-          const caps = await originalCapabilities();
-          caps.languagePairAvailable = baseApi.languagePairAvailable;
-          return caps;
-        };
-        /**
-         * @param {object} [options={}]
-         * @returns {Promise<'available' | 'unavailable'>}
-         */
-        baseApi.languagePairAvailable = async (options = {}) => {
+        // Store the already-wrapped capabilities method from the base
+        const originalWrappedCapabilities = baseApi.capabilities;
+
+        // --- Define Original Logic for Translator-specific methods ---
+        const translatorLanguagePairAvailableLogic = async (options = {}) => {
           if (
             typeof options.sourceLanguage !== "string" ||
             !options.sourceLanguage ||
@@ -2938,6 +3143,29 @@
             ? "available"
             : "unavailable";
         };
+
+        // Define the *new* capabilities logic that combines base caps and lang pair check
+        const translatorCapabilitiesLogic = async () => {
+          // Call the wrapped base capabilities to ensure its tracing occurs
+          const caps = await originalWrappedCapabilities();
+          // Add the *unwrapped* function reference here; the final method will be wrapped
+          caps.languagePairAvailable = translatorLanguagePairAvailableLogic;
+          return caps;
+        };
+
+        // --- Wrap and Assign Final Methods ---
+        // Wrap the combined capabilities logic
+        baseApi.capabilities = wrapStaticMethodForTracing(
+          apiName,
+          "capabilities",
+          translatorCapabilitiesLogic,
+        );
+        // Wrap the language pair availability logic
+        baseApi.languagePairAvailable = wrapStaticMethodForTracing(
+          apiName,
+          "languagePairAvailable",
+          translatorLanguagePairAvailableLogic,
+        );
       }
       return baseApi;
     };
@@ -3113,12 +3341,24 @@
       }
       Logger.log(`Cleaned up pending promise tracking.`);
     }
+    if (!aiNamespace.canCreateTextSession) {
+      aiNamespace.canCreateTextSession = () => Promise.resolve(true);
+      Logger.log(`Added global method: ${nsName}.canCreateTextSession`);
+    }
+    if (!aiNamespace.canCreateGenericSession) {
+      aiNamespace.canCreateGenericSession = () => Promise.resolve(true);
+      Logger.log(`Added global method: ${nsName}.canCreateGenericSession`);
+    }
   }
 
   // --- Script Execution Start ---
 
   try {
     setupPlaceholders();
+    const setupEnd = performance.now();
+    Logger.log(
+      `Placeholder setup completed in ${(setupEnd - scriptStartTime).toFixed(2)}ms`,
+    );
   } catch (e) {
     console.error(
       `[${Config.EMULATED_NAMESPACE}] FATAL ERROR during placeholder setup:`,
@@ -3131,7 +3371,16 @@
   }
 
   function runInitialization() {
-    initializeApis().catch(handleInitError);
+    const initStart = performance.now();
+    Logger.log(`Starting API initialization at ${initStart.toFixed(2)}ms`);
+    initializeApis()
+      .catch(handleInitError)
+      .finally(() => {
+        const initEnd = performance.now();
+        Logger.log(
+          `API initialization finished at ${initEnd.toFixed(2)}ms (duration: ${(initEnd - initStart).toFixed(2)}ms)`,
+        );
+      });
   }
 
   function handleInitError(error) {
@@ -3166,15 +3415,5 @@
     }
   }
 
-  // Use DOMContentLoaded for reliability, but run immediately if already loaded
-  if (
-    document.readyState === "interactive" ||
-    document.readyState === "complete"
-  ) {
-    runInitialization();
-  } else {
-    document.addEventListener("DOMContentLoaded", runInitialization, {
-      once: true,
-    });
-  }
+  runInitialization();
 })();
