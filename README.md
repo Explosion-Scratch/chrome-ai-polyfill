@@ -3,49 +3,47 @@
 [![Install with Tampermonkey](https://img.shields.io/badge/Install%20with-Tampermonkey-00485B.svg)](https://github.com/Explosion-Scratch/chrome-ai-polyfill/raw/main/chrome-ai.user.js)
 [![OpenRouter](https://img.shields.io/badge/Powered%20by-OpenRouter-5568FF.svg)](https://openrouter.ai/)
 
-## 🚀 Unlock Chrome's Experimental AI APIs Today!
+## Access Chrome's Experimental AI APIs
 
-Access Chrome's powerful experimental AI features on **any website** and **any browser** without waiting for official rollout! This userscript emulates Chrome's experimental AI APIs using OpenRouter, enabling you to use these cutting-edge capabilities everywhere.
+This script lets you use Chrome's experimental AI features on **any website** and **any browser**, even before the official release. It emulates Chrome's AI APIs using OpenRouter, so you can try these new capabilities now.
 
-**What makes this special?** Unlike other implementations, this emulation closely mirrors Chrome's actual API interfaces and behavior, allowing developers to build applications that will work seamlessly when Chrome's native AI APIs become widely available.
+This emulation is designed to closely match Chrome's actual API interfaces. This helps developers build applications that should work smoothly when Chrome's native AI APIs are widely available.
 
-![Chrome AI APIs Banner](https://i.imgur.com/example.png)
+## Supported AI APIs
 
-## 🧠 Supported AI APIs
+This emulator provides access to Chrome's experimental AI APIs:
 
-This emulator provides access to all of Chrome's experimental AI APIs:
-
-### 🔮 `window.ai.languageModel` (Prompt API)
-- Create powerful conversational AI interactions
+### `window.ai.languageModel` (Prompt API)
+- Create conversational AI interactions
 - Customize with system prompts, temperature, and top-k settings
-- Full streaming support for responsive interfaces
-- Token counting capabilities
+- Streaming support
+- Token counting
 
-### 📝 `window.ai.writer` & `window.ai.rewriter`
-- Generate high-quality text based on your prompts
-- Rewrite content with specific instructions
-- Control output tone and length
-- Context-aware writing assistance
+### `window.ai.writer` & `window.ai.rewriter`
+- Generate text from prompts
+- Rewrite content with instructions
+- Control tone and length
+- Writing assistance
 
-### 📋 `window.ai.summarizer`
-- Create concise summaries of long content
+### `window.ai.summarizer`
+- Create summaries of long content
 - Adjust summary type, format, and length
-- Add context for more relevant summaries
+- Add context for better summaries
 
-### 🌐 `window.ai.translator` & `window.ai.languageDetector`
+### `window.ai.translator` & `window.ai.languageDetector`
 - Translate text between languages
 - Auto-detect source languages
 - Get confidence scores for language detection
 
-## 🔧 Installation & Setup
+## Installation & Setup
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) or another userscript manager
 2. [Click here to install the script](https://github.com/Explosion-Scratch/chrome-ai-polyfill/raw/main/chrome-ai.user.js)
-3. Get a free API key from [OpenRouter](https://openrouter.ai/keys)
+3. Get an API key from [OpenRouter](https://openrouter.ai/keys)
 4. Click the Tampermonkey icon → "Chrome AI APIs Emulator" → "Set OpenRouter API Key"
-5. That's it! The APIs are now available via `window.ai`
+5. The APIs are now available via `window.ai`
 
-## 💡 Usage Examples
+## Usage Examples
 
 ### Basic Language Model Usage
 
@@ -116,7 +114,7 @@ const summary = await summarizer.summarize(longText);
 console.log(summary);
 ```
 
-## 🛠️ Advanced Configuration
+## Advanced Configuration
 
 ### API Options & Parameters
 
@@ -188,9 +186,9 @@ const translatorCapabilities = await window.ai.translator.capabilities();
 // Access specific translator capabilities like languagePairAvailable
 ```
 
-## 🔍 Demo Sites
+## Demo Sites
 
-Experience these APIs in action at these demo sites:
+See these APIs in action at these demo sites:
 
 ### Community-Built Demos
 
@@ -207,27 +205,23 @@ Experience these APIs in action at these demo sites:
 - [Summary of Summaries](https://chrome.dev/web-ai-demos/summary-of-summaries/) - Advanced summarization example
 - [Weather with AI](https://chrome.dev/web-ai-demos/prompt-api-weather/) - Practical AI application
 
-## 🌟 Why Use This Emulator?
+## Why Use This Emulator?
 
 ### For Developers
 
-- **Future-Proof Your Apps**: Build with Chrome's AI API interfaces today
-- **Cross-Browser Support**: Works on Firefox, Safari, and other browsers
-- **No Waiting for Chrome Canary**: Access these features in stable Chrome
-- **Privacy Control**: Uses your own API key and custom model selection
+- Build with Chrome's AI API interfaces
+- Cross-browser support (Firefox, Safari, etc.)
+- Access features in stable Chrome
+- Use your own API key
 
 ### For AI Enthusiasts
 
-- **Experiment with Chrome's AI Vision**: Try what's coming to Chrome
-- **Access Premium Models**: Use advanced models via OpenRouter
-- **No Special Browser Required**: Works anywhere Tampermonkey runs
+- Experiment with Chrome's AI
+- Use advanced models via OpenRouter
+- Works anywhere Tampermonkey runs
 
-## 🔒 Privacy and Security
+## Privacy and Security
 
-- Your OpenRouter API key is stored locally via Tampermonkey's secure storage
-- All requests go directly from your browser to OpenRouter
-- No tracking or analytics included
-
----
-
-<p align="center">Made with ❤️ for the AI and web developer community</p>
+- Your OpenRouter API key is stored locally via Tampermonkey's secure storage.
+- All requests go directly from your browser to OpenRouter.
+- No tracking or analytics.
