@@ -50,12 +50,12 @@
     OPENROUTER_KEY_CHECK_URL: "https://openrouter.ai/api/v1/key",
 
     // --- Default Models (using free tier where available) ---
-    DEFAULT_PROMPT_MODEL: "meta-llama/llama-4-scout:free",
+    DEFAULT_PROMPT_MODEL: "llama-3.1-nemotron-ultra-253b-v1:free",
     DEFAULT_SUMMARIZER_MODEL: "meta-llama/llama-4-scout:free",
     DEFAULT_WRITER_MODEL: "meta-llama/llama-4-scout:free",
     DEFAULT_REWRITER_MODEL: "meta-llama/llama-4-scout:free",
-    DEFAULT_TRANSLATOR_MODEL: "google/gemma-3-1b-it:free",
-    DEFAULT_LANGUAGE_DETECTOR_MODEL: "google/gemma-3-1b-it:free", // Needs good JSON output
+    DEFAULT_TRANSLATOR_MODEL: "google/gemma-3-27b-it:free",
+    DEFAULT_LANGUAGE_DETECTOR_MODEL: "google/gemma-3-27b-it:free", // Needs good JSON output
 
     // --- Resource Limits & Ratios ---
     MAX_CONTEXT_TOKENS: 128000, // Note: Specific model limits may be lower
@@ -3348,6 +3348,10 @@
     if (!aiNamespace.canCreateGenericSession) {
       aiNamespace.canCreateGenericSession = () => Promise.resolve(true);
       Logger.log(`Added global method: ${nsName}.canCreateGenericSession`);
+    }
+    if (!aiNamespace.createTextSession) {
+      aiNamespace.createTextSession = () => aiNamespace.languageModel.create();
+      Logger.log(`Added global method: ${nsName}.createTextSession`);
     }
   }
 
