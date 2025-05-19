@@ -50,7 +50,7 @@
     OPENROUTER_KEY_CHECK_URL: "https://openrouter.ai/api/v1/key",
 
     // --- Default Models (using free tier where available) ---
-    DEFAULT_PROMPT_MODEL: "llama-3.1-nemotron-ultra-253b-v1:free",
+    DEFAULT_PROMPT_MODEL: "nvidia/llama-3.1-nemotron-ultra-253b-v1:free",
     DEFAULT_SUMMARIZER_MODEL: "meta-llama/llama-4-scout:free",
     DEFAULT_WRITER_MODEL: "meta-llama/llama-4-scout:free",
     DEFAULT_REWRITER_MODEL: "meta-llama/llama-4-scout:free",
