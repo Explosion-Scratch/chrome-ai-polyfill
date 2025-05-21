@@ -3079,8 +3079,11 @@
 
       const originalCapabilities = async () => {
         const keyLoaded = await KeyManager.ensureApiKeyLoaded();
+        if (!keyLoaded) {
+          return { available: "no" };
+        }
         return {
-          available: keyLoaded ? "readily" : "no",
+          available: "readily",
           maxInputTokens: Config.MAX_CONTEXT_TOKENS,
           defaultTemperature: Config.DEFAULT_TEMPERATURE,
           defaultTopK: Config.DEFAULT_TOP_K,
@@ -3235,53 +3238,60 @@
     ];
 
     apiDefinitions.forEach(({ name, InstanceClass, enabled, apiCreator }) => {
-      const assignImplementation = (targetName) => {
-        const staticApiImpl = apiCreator(targetName, InstanceClass, enabled);
-        if (staticApiImpl) {
-          if (!aiNamespace[targetName]) aiNamespace[targetName] = {};
-          // Merge implementation, potentially overwriting placeholder methods
-          Object.assign(aiNamespace[targetName], staticApiImpl);
-          Logger.log(`Initialized API: ${targetName}`);
-        }
+      const primaryName = name;
+      const aliasName = getLowerName(name); // Ensure getLowerName is accessible here or pass it
+
+      const assignImplementation = (targetName, impl) => {
+        if (!aiNamespace[targetName]) aiNamespace[targetName] = {};
+        Object.assign(aiNamespace[targetName], impl);
       };
 
-      const markDisabled = (targetName) => {
-        if (aiNamespace[targetName]) {
-          const disabledError = () => {
-            throw new APIError(
-              `${targetName} API is disabled in configuration.`,
-              {
-                name: "NotSupportedError",
-              }
-            );
-          };
-          aiNamespace[targetName].availability = async () => "unavailable";
-          aiNamespace[targetName].capabilities = async () => ({
-            available: "no",
-          });
-          aiNamespace[targetName].create = disabledError;
-          // Add specific methods if they exist on placeholder and need disabling
-          if (
-            typeof aiNamespace[targetName].languagePairAvailable === "function"
-          ) {
-            aiNamespace[targetName].languagePairAvailable = async () =>
-              "unavailable";
-          }
-          Logger.log(`API explicitly disabled: ${targetName}`);
+      const markApiDisabled = (targetName) => {
+        if (!aiNamespace[targetName]) aiNamespace[targetName] = {}; // Ensure object exists
+        const disabledError = () => {
+          throw new APIError(
+            `${targetName} API is disabled in configuration or due to init error.`,
+            { name: "NotSupportedError" }
+          );
+        };
+        aiNamespace[targetName].availability = async () => "unavailable";
+        aiNamespace[targetName].capabilities = async () => ({
+          available: "no",
+        });
+        aiNamespace[targetName].create = disabledError;
+        if (
+          typeof aiNamespace[targetName].languagePairAvailable === "function"
+        ) {
+          aiNamespace[targetName].languagePairAvailable = async () =>
+            "unavailable";
         }
+        Logger.log(
+          `API explicitly disabled or marked unavailable: ${targetName}`
+        );
       };
 
       if (enabled) {
-        assignImplementation(name); // Assign to primary name
-        const lowerName = getLowerName(name);
-        if (name !== lowerName) {
-          assignImplementation(lowerName); // Assign to lowercase alias
+        const staticApiImpl = apiCreator(primaryName, InstanceClass, enabled);
+        if (staticApiImpl) {
+          assignImplementation(primaryName, staticApiImpl);
+          Logger.log(`Initialized API: ${primaryName}`);
+
+          if (primaryName !== aliasName) {
+            aiNamespace[aliasName] = aiNamespace[primaryName]; // Alias points to the same object
+            Logger.log(`Aliased ${primaryName} to ${aliasName}`);
+          }
+        } else {
+          // Should not happen if apiCreator is robust, but handle defensively
+          markApiDisabled(primaryName);
+          if (primaryName !== aliasName) {
+            aiNamespace[aliasName] = aiNamespace[primaryName];
+          }
         }
       } else {
-        markDisabled(name); // Mark primary name as disabled
-        const lowerName = getLowerName(name);
-        if (name !== lowerName) {
-          markDisabled(lowerName); // Mark alias as disabled
+        markApiDisabled(primaryName);
+        if (primaryName !== aliasName) {
+          // Ensure alias is also marked disabled and points to the same disabled object logic
+          aiNamespace[aliasName] = aiNamespace[primaryName];
         }
       }
     });
@@ -3367,15 +3377,52 @@
       Logger.log(`Cleaned up pending promise tracking.`);
     }
     if (!aiNamespace.canCreateTextSession) {
-      aiNamespace.canCreateTextSession = () => Promise.resolve(true);
+      aiNamespace.canCreateTextSession = async () => {
+        if (
+          Config.ENABLE_PROMPT_API &&
+          aiNamespace.languageModel &&
+          typeof aiNamespace.languageModel.capabilities === "function"
+        ) {
+          const caps = await aiNamespace.languageModel.capabilities();
+          // Return 'readily' if available, 'no' otherwise. The spec also has 'after-prompt'.
+          // For this polyfill, 'available' from capabilities implies 'readily'.
+          return caps.available === "readily" ? "readily" : "no";
+        }
+        return "no"; // Default to no if prompt API is disabled or not setup
+      };
       Logger.log(`Added global method: ${nsName}.canCreateTextSession`);
     }
     if (!aiNamespace.canCreateGenericSession) {
-      aiNamespace.canCreateGenericSession = () => Promise.resolve(true);
+      // Assuming generic session is also tied to languageModel
+      aiNamespace.canCreateGenericSession = async () => {
+        if (
+          Config.ENABLE_PROMPT_API &&
+          aiNamespace.languageModel &&
+          typeof aiNamespace.languageModel.capabilities === "function"
+        ) {
+          const caps = await aiNamespace.languageModel.capabilities();
+          return caps.available === "readily" ? "readily" : "no";
+        }
+        return "no";
+      };
       Logger.log(`Added global method: ${nsName}.canCreateGenericSession`);
     }
     if (!aiNamespace.createTextSession) {
-      aiNamespace.createTextSession = () => aiNamespace.languageModel.create();
+      aiNamespace.createTextSession = (options = {}) => {
+        if (
+          Config.ENABLE_PROMPT_API &&
+          aiNamespace.languageModel &&
+          typeof aiNamespace.languageModel.create === "function"
+        ) {
+          return aiNamespace.languageModel.create(options);
+        }
+        return Promise.reject(
+          new APIError(
+            "Prompt API (languageModel) is not enabled or available.",
+            { name: "NotSupportedError" }
+          )
+        );
+      };
       Logger.log(`Added global method: ${nsName}.createTextSession`);
     }
   }
