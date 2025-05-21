@@ -489,7 +489,7 @@ interface AIWriterAPI {
 // ** Rewriter API Types **
 
 /** Tone guideline for rewriting. */
-type AIRewriterTone = "more-format" | "as-is" | "more-casual";
+type AIRewriterTone = "more-formal" | "as-is" | "more-casual";
 /** Length guideline for rewriting. */
 type AIRewriterLength = "shorter" | "longer" | "as-is";
 

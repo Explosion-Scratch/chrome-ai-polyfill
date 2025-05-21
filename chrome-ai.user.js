@@ -207,12 +207,12 @@
     logPrompt: (apiName, messages) => {
       try {
         console.groupCollapsed(
-          `[${Config.EMULATED_NAMESPACE}] API Call: ${apiName} - Prompt Details (Click to expand)`,
+          `[${Config.EMULATED_NAMESPACE}] API Call: ${apiName} - Prompt Details (Click to expand)`
         );
         console.log("Messages:", JSON.parse(JSON.stringify(messages)));
       } catch (e) {
         console.groupCollapsed(
-          `[${Config.EMULATED_NAMESPACE}] API Call: ${apiName} - Prompt Details (Stringified)`,
+          `[${Config.EMULATED_NAMESPACE}] API Call: ${apiName} - Prompt Details (Stringified)`
         );
         console.log("Messages (raw):", messages);
         console.warn("Could not serialize messages for detailed logging:", e);
@@ -246,7 +246,9 @@
             if (Array.isArray(arg)) return `[Array(${arg.length})]`;
             if (typeof arg === "object") {
               const keys = Object.keys(arg);
-              return `{${keys.slice(0, 3).join(", ")}${keys.length > 3 ? ", ..." : ""}}`;
+              return `{${keys.slice(0, 3).join(", ")}${
+                keys.length > 3 ? ", ..." : ""
+              }}`;
             }
             return typeof arg;
           })
@@ -257,7 +259,9 @@
       const summarizeResult = (result) => {
         if (result === null || result === undefined) return String(result);
         if (typeof result === "string")
-          return `"${result.substring(0, 50)}${result.length > 50 ? "..." : ""}"`;
+          return `"${result.substring(0, 50)}${
+            result.length > 50 ? "..." : ""
+          }"`;
         if (typeof result === "number" || typeof result === "boolean")
           return String(result);
         if (result instanceof ReadableStream) return "[ReadableStream]";
@@ -272,12 +276,16 @@
         )
           return `[${result.constructor.name}]`;
         if (typeof result === "object")
-          return `{${Object.keys(result).slice(0, 3).join(", ")}${Object.keys(result).length > 3 ? "..." : ""}}`;
+          return `{${Object.keys(result).slice(0, 3).join(", ")}${
+            Object.keys(result).length > 3 ? "..." : ""
+          }}`;
         return typeof result;
       };
 
       Logger.log(
-        `[TRACE:${callId}] >> ${apiName}#${instanceId}.${methodName}(${summarizeArgs(args)})`,
+        `[TRACE:${callId}] >> ${apiName}#${instanceId}.${methodName}(${summarizeArgs(
+          args
+        )})`
       );
 
       return {
@@ -285,14 +293,14 @@
           if (!Config.TRACE) return;
           Logger.log(
             `[TRACE:${callId}] << ${apiName}#${instanceId}.${methodName} returned:`,
-            summarizeResult(result),
+            summarizeResult(result)
           );
         },
         logError: (error) => {
           if (!Config.TRACE) return;
           Logger.error(
             `[TRACE:${callId}] !! ${apiName}#${instanceId}.${methodName} threw:`,
-            error,
+            error
           ); // Log full error
         },
       };
@@ -302,6 +310,8 @@
   const scriptStartTime = performance.now();
   Logger.log(`Script execution started at ${scriptStartTime.toFixed(2)}ms`);
 
+  const getLowerName = (n) => n[0].toLowerCase() + n.slice(1);
+
   // --- State Variables ---
   let openRouterApiKey = null; // Loaded during init
 
@@ -310,7 +320,7 @@
     constructor(
       debounceMs = Config.RATE_DEBOUNCE,
       maxRequests = Config.RATE_REQUESTS_PER_WINDOW,
-      windowMs = Config.RATE_REQUEST_WINDOW,
+      windowMs = Config.RATE_REQUEST_WINDOW
     ) {
       this.debounceMs = debounceMs;
       this.maxRequests = maxRequests;
@@ -326,7 +336,7 @@
     wouldExceedRateLimit() {
       const now = Date.now();
       this.requestTimestamps = this.requestTimestamps.filter(
-        (time) => time >= now - this.windowMs,
+        (time) => time >= now - this.windowMs
       );
       return this.requestTimestamps.length >= this.maxRequests;
     }
@@ -344,7 +354,9 @@
     async execute(fn, key, ...args) {
       if (this.wouldExceedRateLimit()) {
         const error = new APIError(
-          `Rate limit exceeded. Maximum ${this.maxRequests} requests per ${this.windowMs / 1000} seconds.`,
+          `Rate limit exceeded. Maximum ${this.maxRequests} requests per ${
+            this.windowMs / 1000
+          } seconds.`
         );
         Logger.warn(`Rate limit check failed for key: ${key}`);
         throw error;
@@ -360,7 +372,7 @@
         }
         const timerId = setTimeout(
           () => this._executePending(key),
-          this.debounceMs,
+          this.debounceMs
         );
         this.debounceTimers.set(key, timerId);
         return pendingInfo.promise;
@@ -382,7 +394,7 @@
 
       const timerId = setTimeout(
         () => this._executePending(key),
-        this.debounceMs,
+        this.debounceMs
       );
       this.debounceTimers.set(key, timerId);
 
@@ -401,7 +413,9 @@
 
       if (this.wouldExceedRateLimit()) {
         const error = new APIError(
-          `Rate limit exceeded at execution time for key ${key}. Max ${this.maxRequests}/${this.windowMs / 1000}s.`,
+          `Rate limit exceeded at execution time for key ${key}. Max ${
+            this.maxRequests
+          }/${this.windowMs / 1000}s.`
         );
         Logger.warn(error.message);
         pendingInfo.reject(error);
@@ -476,7 +490,7 @@
       const trailingWhitespace = text.match(/\s*$/)?.[0] || "";
       const content = text.slice(
         leadingWhitespace.length,
-        -trailingWhitespace.length || undefined,
+        -trailingWhitespace.length || undefined
       );
 
       const markdownToPlainText = function (markdown) {
@@ -486,7 +500,7 @@
             typeof window.DOMPurify?.sanitize !== "function"
           ) {
             Logger.warn(
-              "marked or DOMPurify not available for plain-text conversion. Returning raw markdown.",
+              "marked or DOMPurify not available for plain-text conversion. Returning raw markdown."
             );
             return markdown;
           }
@@ -517,8 +531,10 @@
               // Prepend list marker, add newline before if it's not the first item
               el.prepend(
                 document.createTextNode(
-                  `${el.previousElementSibling?.tagName === "LI" ? "\n" : ""}\t- `,
-                ),
+                  `${
+                    el.previousElementSibling?.tagName === "LI" ? "\n" : ""
+                  }\t- `
+                )
               );
             } else if (el.tagName === "P" && el.previousElementSibling) {
               // Add double newline before paragraphs (except the first)
@@ -540,7 +556,7 @@
         } catch (error) {
           Logger.warn(
             `Error converting markdown to plain text: ${error.message}. Returning raw markdown.`,
-            error,
+            error
           );
           return markdown;
         }
@@ -595,7 +611,7 @@
         } else {
           Logger.warn(
             `Could not convert language tag ${languageTag} to human-readable form:`,
-            e,
+            e
           );
         }
         return languageTag;
@@ -618,7 +634,7 @@
           item.confidence >= 0 &&
           typeof item.detectedLanguage === "string" && // Also check language code validity
           item.detectedLanguage.length > 0 &&
-          item.detectedLanguage.toLowerCase() !== "und", // Exclude 'und' from normalization if other languages exist
+          item.detectedLanguage.toLowerCase() !== "und" // Exclude 'und' from normalization if other languages exist
       );
 
       // If only 'und' was found, return it as is
@@ -639,7 +655,7 @@
 
       if (sum <= 0) {
         const equalConfidence = parseFloat(
-          (1.0 / validResults.length).toFixed(3),
+          (1.0 / validResults.length).toFixed(3)
         );
         return validResults
           .map((item) => ({
@@ -660,7 +676,7 @@
         }
         normalizedConfidence = Math.max(
           0.0,
-          Math.min(1.0, normalizedConfidence),
+          Math.min(1.0, normalizedConfidence)
         );
         return { ...item, confidence: normalizedConfidence };
       });
@@ -735,7 +751,7 @@
     calculateTotalTokens: (messages) =>
       messages.reduce(
         (sum, msg) => sum + Utils.tokenize(msg?.content || ""),
-        0,
+        0
       ),
 
     /** @param {string | undefined} sharedContext @returns {string} */
@@ -743,7 +759,7 @@
       sharedContext?.trim()
         ? Config.SHARED_CONTEXT_TEMPLATE.replace(
             "{sharedContext}",
-            sharedContext.trim(),
+            sharedContext.trim()
           )
         : "",
 
@@ -802,7 +818,7 @@
         const abortError = new DOMException(
           "Operation aborted before stream start.",
           "AbortError",
-          { cause: signal.reason },
+          { cause: signal.reason }
         );
         return new ReadableStream({
           start(controller) {
@@ -828,7 +844,7 @@
             const error = new DOMException(
               "Operation aborted during stream.",
               "AbortError",
-              { cause: signal.reason || event?.reason },
+              { cause: signal.reason || event?.reason }
             );
             Logger.warn(`${apiName}: Stream aborted.`, error.cause);
             try {
@@ -843,11 +859,11 @@
           if (totalTokens > Config.MAX_CONTEXT_TOKENS) {
             const error = new QuotaExceededError(
               `${Config.EMULATED_NAMESPACE}.${apiName}: Input exceeds maximum token limit.`,
-              { requested: totalTokens, quota: Config.MAX_CONTEXT_TOKENS },
+              { requested: totalTokens, quota: Config.MAX_CONTEXT_TOKENS }
             );
             Logger.error(
               error.message,
-              `Requested: ${totalTokens}, Quota: ${Config.MAX_CONTEXT_TOKENS}`,
+              `Requested: ${totalTokens}, Quota: ${Config.MAX_CONTEXT_TOKENS}`
             );
             requestAbortedOrFinished = true;
             signal?.removeEventListener("abort", abortHandler);
@@ -872,7 +888,7 @@
                   accumulatedResponseForHistory += rawDelta || "";
                   try {
                     streamController.enqueue(
-                      accumulated ? formattedAccumulated : formattedDelta,
+                      accumulated ? formattedAccumulated : formattedDelta
                     );
                   } catch (e) {
                     Logger.error(`${apiName}: Error enqueuing chunk:`, e);
@@ -894,7 +910,7 @@
                   } catch (e) {
                     Logger.warn(
                       `${apiName}: Error during stream close/onSuccess:`,
-                      e,
+                      e
                     );
                   }
                 },
@@ -904,14 +920,14 @@
                   signal?.removeEventListener("abort", abortHandler);
                   Logger.error(
                     `${apiName}: Streaming error received from API call:`,
-                    error,
+                    error
                   );
                   try {
                     streamController.error(error);
                   } catch (e) {
                     Logger.warn(
                       `${apiName}: Error propagating stream error:`,
-                      e,
+                      e
                     );
                   }
                 },
@@ -924,7 +940,7 @@
               if (error.name !== "AbortError") {
                 Logger.error(
                   `${apiName}: Error during streaming setup/request:`,
-                  error,
+                  error
                 );
               }
               try {
@@ -932,13 +948,13 @@
               } catch (e) {
                 Logger.warn(
                   `${apiName}: Error setting controller error state:`,
-                  e,
+                  e
                 );
               }
             } else if (!streamController) {
               Logger.error(
                 `${apiName}: Stream controller unavailable during setup error:`,
-                error,
+                error
               );
             }
           }
@@ -946,7 +962,7 @@
         cancel: (reason) => {
           Logger.log(
             `${apiName}: Stream cancelled by consumer. Reason:`,
-            reason,
+            reason
           );
           requestAbortedOrFinished = true;
         },
@@ -967,7 +983,7 @@
               loaded: 0,
               total: 1,
               lengthComputable: true,
-            }),
+            })
           );
         }, 5);
 
@@ -977,13 +993,13 @@
               loaded: 1,
               total: 1,
               lengthComputable: true,
-            }),
+            })
           );
         }, 50);
       } catch (e) {
         Logger.error(
           `Error calling monitor function or dispatching events:`,
-          e,
+          e
         );
       }
     },
@@ -1001,7 +1017,7 @@
           _isGmFetchUsed = true;
         } else {
           Logger.warn(
-            `Potential CSP detected for OpenRouter, but GM_fetch is not available. Using window.fetch, requests might fail.`,
+            `Potential CSP detected for OpenRouter, but GM_fetch is not available. Using window.fetch, requests might fail.`
           );
         }
       }
@@ -1047,7 +1063,7 @@
         const error = new DOMException(
           "Operation aborted before request.",
           "AbortError",
-          { cause: signal.reason },
+          { cause: signal.reason }
         );
         on?.error?.(error);
         return Promise.reject(error);
@@ -1077,7 +1093,7 @@
           new DOMException("Operation aborted.", "AbortError");
         Logger.warn(
           `${apiName}: Abort detected. Reason:`,
-          abortReason?.message || "No reason provided",
+          abortReason?.message || "No reason provided"
         );
         // Avoid aborting if already aborted (can cause issues)
         if (!internalController.signal.aborted) {
@@ -1116,7 +1132,7 @@
         try {
           const response = await _fetch(
             Config.OPENROUTER_CHAT_COMPLETIONS_URL,
-            requestOptions,
+            requestOptions
           );
 
           if (!response.ok) {
@@ -1145,7 +1161,7 @@
           if (stream) {
             if (!response.body) {
               throw new APIError(
-                `${apiName}: Response body is null for stream.`,
+                `${apiName}: Response body is null for stream.`
               );
             }
             const reader = response.body.getReader();
@@ -1159,7 +1175,7 @@
                   new DOMException(
                     "Operation aborted during stream read.",
                     "AbortError",
-                    { cause: combinedSignal.reason },
+                    { cause: combinedSignal.reason }
                   );
                 on?.error?.(error);
                 reject(error);
@@ -1176,7 +1192,7 @@
                 // Handle errors during read (e.g., network issues)
                 const error = new APIError(
                   `${apiName}: Error reading stream chunk.`,
-                  { cause: readError },
+                  { cause: readError }
                 );
                 on?.error?.(error);
                 reject(error);
@@ -1190,7 +1206,7 @@
                   new DOMException(
                     "Operation aborted post-read.",
                     "AbortError",
-                    { cause: combinedSignal.reason },
+                    { cause: combinedSignal.reason }
                   );
                 on?.error?.(error);
                 reject(error);
@@ -1204,25 +1220,25 @@
                 if (buffer.trim()) {
                   Logger.warn(
                     `${apiName}: Remaining buffer at stream end:`,
-                    buffer,
+                    buffer
                   );
                   const finalDeltas = Utils.parseSSE(buffer + "\n\n");
                   finalDeltas.forEach((delta) => {
                     accumulatedRawResponse += delta;
                     const formattedDelta = Utils.formatResponse(
                       delta,
-                      responseFormat,
+                      responseFormat
                     );
                     const formattedAccumulated = Utils.formatResponse(
                       accumulatedRawResponse,
-                      responseFormat,
+                      responseFormat
                     );
                     on?.chunk?.(formattedDelta, formattedAccumulated, delta);
                   });
                 }
                 const formattedFinalResponse = Utils.formatResponse(
                   accumulatedRawResponse,
-                  responseFormat,
+                  responseFormat
                 );
                 on?.finish?.(formattedFinalResponse);
                 resolve(formattedFinalResponse);
@@ -1240,11 +1256,11 @@
                     accumulatedRawResponse += delta;
                     const formattedDelta = Utils.formatResponse(
                       delta,
-                      responseFormat,
+                      responseFormat
                     );
                     const formattedAccumulated = Utils.formatResponse(
                       accumulatedRawResponse,
-                      responseFormat,
+                      responseFormat
                     );
                     on?.chunk?.(formattedDelta, formattedAccumulated, delta);
                   });
@@ -1262,27 +1278,27 @@
                 accumulatedRawResponse = content;
                 const formattedContent = Utils.formatResponse(
                   content,
-                  responseFormat,
+                  responseFormat
                 );
                 on?.finish?.(formattedContent);
                 resolve(formattedContent);
               } else {
                 Logger.error(
                   `${apiName}: Invalid non-streaming response structure. Content missing or not string.`,
-                  jsonResponse,
+                  jsonResponse
                 );
                 throw new APIError(
-                  `${apiName}: Invalid response structure from OpenRouter (content missing).`,
+                  `${apiName}: Invalid response structure from OpenRouter (content missing).`
                 );
               }
             } catch (parseError) {
               Logger.error(
                 `${apiName}: Failed to parse non-streaming JSON response: ${parseError.message}`,
-                responseBodyText,
+                responseBodyText
               );
               throw new APIError(
                 `${apiName}: Failed to parse response from OpenRouter.`,
-                { cause: parseError },
+                { cause: parseError }
               );
             }
           }
@@ -1304,11 +1320,11 @@
           ) {
             Logger.error(
               `${apiName}: Unexpected error during API call:`,
-              error,
+              error
             );
             finalError = new APIError(
               `${apiName}: Network or processing error: ${error.message}`,
-              { cause: error },
+              { cause: error }
             );
           }
 
@@ -1319,7 +1335,7 @@
           // Ensure internal controller is aborted if not already
           if (!internalController.signal.aborted) {
             internalController.abort(
-              new DOMException("Operation finished or errored.", "AbortError"),
+              new DOMException("Operation finished or errored.", "AbortError")
             );
           }
         }
@@ -1371,7 +1387,7 @@
               responseFormat,
               on,
             }),
-          requestKey,
+          requestKey
           // No extra args needed for the closure
         );
       } catch (error) {
@@ -1380,7 +1396,7 @@
           error.message.includes("Rate limit exceeded")
         ) {
           Logger.warn(
-            `${apiName}: Rate limit exceeded. Request key: ${requestKey}`,
+            `${apiName}: Rate limit exceeded. Request key: ${requestKey}`
           );
           on?.error?.(error);
         } else if (error.name === "AbortError") {
@@ -1390,13 +1406,13 @@
         ) {
           Logger.error(
             `${apiName}: Unexpected error in askOpenRouter wrapper:`,
-            error,
+            error
           );
           const wrappedError = new APIError(
             `askOpenRouter Error: ${error.message}`,
             {
               cause: error,
-            },
+            }
           );
           on?.error?.(wrappedError);
         }
@@ -1414,7 +1430,7 @@
         openRouterApiKey ?? (await GM_getValue(Config.API_KEY_STORAGE_KEY, ""));
       const newKey = prompt(
         "Enter OpenRouter API Key (https://openrouter.ai/keys):",
-        currentKey,
+        currentKey
       );
       if (newKey === null) {
         alert("API Key entry cancelled.");
@@ -1423,7 +1439,7 @@
       } else if (newKey !== "" && newKey !== currentKey) {
         if (!newKey.startsWith("sk-or-")) {
           alert(
-            "Warning: Key does not start with 'sk-or-'. It might be invalid. Saving anyway.",
+            "Warning: Key does not start with 'sk-or-'. It might be invalid. Saving anyway."
           );
         }
         await GM_setValue(Config.API_KEY_STORAGE_KEY, newKey);
@@ -1450,7 +1466,7 @@
       const confirmed =
         !confirmFirst ||
         confirm(
-          "Are you sure you want to clear the stored OpenRouter API Key?",
+          "Are you sure you want to clear the stored OpenRouter API Key?"
         );
       if (confirmed) {
         await GM_deleteValue(Config.API_KEY_STORAGE_KEY);
@@ -1479,7 +1495,7 @@
       const apiKey = await KeyManager.ensureApiKeyLoaded();
       if (!apiKey) {
         alert(
-          "OpenRouter API Key is not set. Please set it using the Tampermonkey menu command.",
+          "OpenRouter API Key is not set. Please set it using the Tampermonkey menu command."
         );
         return null;
       }
@@ -1553,8 +1569,8 @@
           details.is_free_tier === true
             ? "Yes"
             : details.is_free_tier === false
-              ? "No"
-              : "N/A";
+            ? "No"
+            : "N/A";
 
         let message = `--- OpenRouter Key Status ---`;
         message += `\nLabel: ${details.label || "N/A"}`;
@@ -1622,13 +1638,13 @@
         this._creationSignal?.addEventListener(
           "abort",
           () => manualAbortHandler(this._creationSignal?.reason),
-          { once: true },
+          { once: true }
         );
         // Also listen for instance abort to reflect in combined (for symmetry, though less critical)
         this._instanceAbortController.signal.addEventListener(
           "abort",
           () => manualAbortHandler(this._instanceAbortController.signal.reason),
-          { once: true },
+          { once: true }
         );
       }
 
@@ -1662,14 +1678,14 @@
     /** @private */
     _wrapMethodsForTracing() {
       Logger.log(
-        `[TRACE] Wrapping methods for ${this._apiName}#${this._instanceId}`,
+        `[TRACE] Wrapping methods for ${this._apiName}#${this._instanceId}`
       );
       const proto = Object.getPrototypeOf(this);
       const methodNames = Object.getOwnPropertyNames(proto).filter(
         (name) =>
           name !== "constructor" &&
           typeof this[name] === "function" &&
-          !name.startsWith("_"), // Wrap public methods
+          !name.startsWith("_") // Wrap public methods
       );
 
       // Include potentially overridden methods from the instance itself?
@@ -1682,7 +1698,7 @@
         const ownPropDesc = Object.getOwnPropertyDescriptor(this, methodName);
         if (ownPropDesc && !ownPropDesc.configurable) {
           Logger.warn(
-            `[TRACE] Cannot wrap non-configurable method ${this._apiName}#${this._instanceId}.${methodName}`,
+            `[TRACE] Cannot wrap non-configurable method ${this._apiName}#${this._instanceId}.${methodName}`
           );
           return; // Skip non-configurable methods
         }
@@ -1693,7 +1709,7 @@
             this._apiName,
             this._instanceId,
             methodName,
-            args,
+            args
           );
           try {
             const result = originalMethod.apply(this, args);
@@ -1707,7 +1723,7 @@
                 (err) => {
                   tracer?.logError(err);
                   throw err; // Re-throw error
-                },
+                }
               );
             } else {
               tracer?.logResult(result);
@@ -1731,7 +1747,7 @@
         } catch (e) {
           Logger.error(
             `[TRACE] Failed to wrap method ${this._apiName}#${this._instanceId}.${methodName}:`,
-            e,
+            e
           );
           // Attempt direct assignment as fallback? Might fail silently.
           // this[methodName] = wrappedMethod;
@@ -1771,8 +1787,8 @@
         this._instanceAbortController.abort(
           new DOMException(
             `${this._apiName} instance explicitly destroyed.`,
-            "AbortError",
-          ),
+            "AbortError"
+          )
         );
       }
       // Clean up listeners added in constructor fallback
@@ -1793,9 +1809,9 @@
         ? typeof AbortSignal.any === "function"
           ? AbortSignal.any([this._combinedSignal, callOptions.signal])
           : AbortSignal.any // Check if AbortSignal.any exists
-            ? AbortSignal.any([this._combinedSignal, callOptions.signal])
-            : // Fallback: Prioritize call signal if AbortSignal.any is unavailable
-              callOptions.signal
+          ? AbortSignal.any([this._combinedSignal, callOptions.signal])
+          : // Fallback: Prioritize call signal if AbortSignal.any is unavailable
+            callOptions.signal
         : this._combinedSignal;
 
       // Check abort before proceeding
@@ -1809,10 +1825,10 @@
           this._combinedSignal.reason ??
           new DOMException(
             `${this._apiName} operation aborted before start.`,
-            "AbortError",
+            "AbortError"
           );
         Logger.warn(
-          reason.message || `${this._apiName} operation aborted before start.`,
+          reason.message || `${this._apiName} operation aborted before start.`
         );
         throw reason instanceof Error
           ? reason
@@ -1826,7 +1842,7 @@
       if (totalTokens > this.inputQuota) {
         const error = new QuotaExceededError(
           `${this._apiName}: Input exceeds token limit.`,
-          { requested: totalTokens, quota: this.inputQuota },
+          { requested: totalTokens, quota: this.inputQuota }
         );
         Logger.error(error.message);
         throw error;
@@ -1850,7 +1866,7 @@
               if (err.name !== "AbortError") {
                 Logger.error(
                   `${this._apiName}: Error reported during non-streaming request:`,
-                  err,
+                  err
                 );
               }
               apiError = err;
@@ -1871,14 +1887,14 @@
             error.cause ?? // Check if the caught error has a cause
             new DOMException(
               `${this._apiName} operation aborted.`,
-              "AbortError",
+              "AbortError"
             );
           throw reason instanceof Error
             ? reason
             : new DOMException(
                 reason.message || "Operation aborted",
                 "AbortError",
-                { cause: reason },
+                { cause: reason }
               );
         } else if (
           error instanceof QuotaExceededError ||
@@ -1889,11 +1905,13 @@
           // Wrap unexpected errors
           Logger.error(
             `${this._apiName}: Unexpected error during non-streaming API request:`,
-            error,
+            error
           );
           throw new APIError(
-            `${this._apiName}: Failed to complete operation. ${error.message || "Unknown error"}`,
-            { cause: error },
+            `${this._apiName}: Failed to complete operation. ${
+              error.message || "Unknown error"
+            }`,
+            { cause: error }
           );
         }
       }
@@ -1920,9 +1938,9 @@
         ? typeof AbortSignal.any === "function"
           ? AbortSignal.any([this._combinedSignal, callOptions.signal])
           : AbortSignal.any // Check if AbortSignal.any exists
-            ? AbortSignal.any([this._combinedSignal, callOptions.signal])
-            : // Fallback: Prioritize call signal if AbortSignal.any is unavailable
-              callOptions.signal
+          ? AbortSignal.any([this._combinedSignal, callOptions.signal])
+          : // Fallback: Prioritize call signal if AbortSignal.any is unavailable
+            callOptions.signal
         : this._combinedSignal;
 
       const responseFormat =
@@ -1963,13 +1981,13 @@
       if (options.temperature !== undefined) {
         this._parameters.temperature = Math.max(
           0,
-          Math.min(Config.MAX_TEMPERATURE, options.temperature),
+          Math.min(Config.MAX_TEMPERATURE, options.temperature)
         );
       }
       if (options.topK !== undefined) {
         this._parameters.topK = Math.max(
           1, // topK must be > 0
-          Math.min(Config.MAX_TOP_K, options.topK),
+          Math.min(Config.MAX_TOP_K, options.topK)
         );
       }
 
@@ -1985,7 +2003,7 @@
       }
 
       Logger.log(
-        `${this._apiName}: Session created. Temp: ${this._parameters.temperature}, TopK: ${this._parameters.topK}, History items: ${this._history.length}`,
+        `${this._apiName}: Session created. Temp: ${this._parameters.temperature}, TopK: ${this._parameters.topK}, History items: ${this._history.length}`
       );
     }
 
@@ -2002,11 +2020,11 @@
               typeof p !== "object" ||
               p === null ||
               !p.role ||
-              typeof p.content !== "string",
+              typeof p.content !== "string"
           ))
       ) {
         throw new TypeError(
-          "Invalid initialPrompts format. Expected array of {role: string, content: string}.",
+          "Invalid initialPrompts format. Expected array of {role: string, content: string}."
         );
       }
 
@@ -2017,12 +2035,12 @@
 
       if (hasExplicitSystemPrompt && systemInInitial) {
         throw new TypeError(
-          "Cannot provide both systemPrompt option and a system role message in initialPrompts.",
+          "Cannot provide both systemPrompt option and a system role message in initialPrompts."
         );
       }
       if (systemInInitial && initial[0].role !== "system") {
         throw new TypeError(
-          "If initialPrompts contains a system role message, it must be the first message.",
+          "If initialPrompts contains a system role message, it must be the first message."
         );
       }
 
@@ -2032,16 +2050,14 @@
       if (initial) {
         // Filter out any potentially null/invalid entries defensively
         history.push(
-          ...initial.filter(
-            (p) => p && p.role && typeof p.content === "string",
-          ),
+          ...initial.filter((p) => p && p.role && typeof p.content === "string")
         );
       }
 
       const validRoles = ["system", "user", "assistant"];
       if (history.some((msg) => !validRoles.includes(msg.role))) {
         throw new TypeError(
-          "Invalid role found in initial prompts or system prompt.",
+          "Invalid role found in initial prompts or system prompt."
         );
       }
 
@@ -2060,18 +2076,18 @@
               typeof msg !== "object" ||
               msg === null ||
               !msg.role ||
-              typeof msg.content !== "string",
+              typeof msg.content !== "string"
           )
         ) {
           throw new TypeError(
-            "Invalid input format. Expected string or array of {role: string, content: string}.",
+            "Invalid input format. Expected string or array of {role: string, content: string}."
           );
         }
         // Return a new array with copies of messages
         return input.map((msg) => ({ ...msg }));
       }
       throw new TypeError(
-        "Invalid input type. Expected string or array of {role: string, content: string}.",
+        "Invalid input type. Expected string or array of {role: string, content: string}."
       );
     }
 
@@ -2081,13 +2097,13 @@
       if (callOptions.temperature !== undefined) {
         parameters.temperature = Math.max(
           0,
-          Math.min(Config.MAX_TEMPERATURE, callOptions.temperature),
+          Math.min(Config.MAX_TEMPERATURE, callOptions.temperature)
         );
       }
       if (callOptions.topK !== undefined) {
         parameters.topK = Math.max(
           1,
-          Math.min(Config.MAX_TOP_K, callOptions.topK),
+          Math.min(Config.MAX_TOP_K, callOptions.topK)
         );
       }
       return parameters;
@@ -2105,7 +2121,7 @@
             content: callOptions.systemPrompt,
           };
           Logger.log(
-            `${this._apiName}: Replacing session system prompt with per-call system prompt.`,
+            `${this._apiName}: Replacing session system prompt with per-call system prompt.`
           );
         } else {
           messagesForApi.unshift({
@@ -2128,7 +2144,7 @@
     async prompt(input, callOptions = {}) {
       const { messagesForApi, currentUserMessages } = this._prepareMessages(
         input,
-        callOptions,
+        callOptions
       );
       const parameters = this._prepareParameters(callOptions);
 
@@ -2148,7 +2164,7 @@
         content: assistantResponse, // Storing formatted response for now
       });
       Logger.log(
-        `${this._apiName}: prompt completed. History updated to ${this._history.length} items.`,
+        `${this._apiName}: prompt completed. History updated to ${this._history.length} items.`
       );
 
       return assistantResponse;
@@ -2162,7 +2178,7 @@
     promptStreaming(input, callOptions = {}) {
       const { messagesForApi, currentUserMessages } = this._prepareMessages(
         input,
-        callOptions,
+        callOptions
       );
       const parameters = this._prepareParameters(callOptions);
 
@@ -2173,12 +2189,12 @@
             content: fullRawResponse, // Use raw response from stream end for history
           });
           Logger.log(
-            `${this._apiName}: promptStreaming completed. History updated to ${this._history.length} items.`,
+            `${this._apiName}: promptStreaming completed. History updated to ${this._history.length} items.`
           );
         } else {
           // If streaming failed or was aborted, still add user messages
           Logger.warn(
-            `${this._apiName}: promptStreaming did not complete successfully. History updated with user messages only.`,
+            `${this._apiName}: promptStreaming did not complete successfully. History updated with user messages only.`
           );
           this._history.push(...currentUserMessages);
         }
@@ -2221,7 +2237,7 @@
       clonedInstance._parameters = { ...this._parameters };
       clonedInstance._history = this._history.map((msg) => ({ ...msg }));
       Logger.log(
-        `${this._apiName}: Cloned session. History items: ${clonedInstance._history.length}`,
+        `${this._apiName}: Cloned session. History items: ${clonedInstance._history.length}`
       );
       return clonedInstance;
     }
@@ -2242,7 +2258,7 @@
       const format = options.format ?? "markdown";
       const length = options.length ?? "medium";
       const sharedContextSection = Utils.formatSharedContext(
-        options.sharedContext,
+        options.sharedContext
       );
 
       this._systemPrompt = Config.buildSystemPrompt("Summarizer", {
@@ -2261,7 +2277,7 @@
         throw reason;
       }
       Logger.log(
-        `${this._apiName}: Instance created. Type: ${type}, Format: ${format}, Length: ${length}`,
+        `${this._apiName}: Instance created. Type: ${type}, Format: ${format}, Length: ${length}`
       );
     }
 
@@ -2283,7 +2299,7 @@
     async summarize(text, callOptions = {}) {
       if (typeof text !== "string") {
         throw new TypeError(
-          `Input 'text' for ${this._apiName}.summarize must be a string.`,
+          `Input 'text' for ${this._apiName}.summarize must be a string.`
         );
       }
 
@@ -2314,7 +2330,7 @@
     summarizeStreaming(text, callOptions = {}) {
       if (typeof text !== "string") {
         throw new TypeError(
-          `Input 'text' for ${this._apiName}.summarizeStreaming must be a string.`,
+          `Input 'text' for ${this._apiName}.summarizeStreaming must be a string.`
         );
       }
 
@@ -2353,7 +2369,7 @@
       const tone = options.tone ?? "neutral";
       const length = options.length ?? "medium";
       const sharedContextSection = Utils.formatSharedContext(
-        options.sharedContext,
+        options.sharedContext
       );
 
       this._systemPrompt = Config.buildSystemPrompt("Writer", {
@@ -2371,7 +2387,7 @@
         throw reason;
       }
       Logger.log(
-        `${this._apiName}: Instance created. Tone: ${tone}, Length: ${length}`,
+        `${this._apiName}: Instance created. Tone: ${tone}, Length: ${length}`
       );
     }
 
@@ -2393,7 +2409,7 @@
     async write(taskPrompt, callOptions = {}) {
       if (typeof taskPrompt !== "string") {
         throw new TypeError(
-          `Input 'taskPrompt' for ${this._apiName}.write must be a string.`,
+          `Input 'taskPrompt' for ${this._apiName}.write must be a string.`
         );
       }
 
@@ -2421,7 +2437,7 @@
     writeStreaming(taskPrompt, callOptions = {}) {
       if (typeof taskPrompt !== "string") {
         throw new TypeError(
-          `Input 'taskPrompt' for ${this._apiName}.writeStreaming must be a string.`,
+          `Input 'taskPrompt' for ${this._apiName}.writeStreaming must be a string.`
         );
       }
 
@@ -2484,7 +2500,7 @@
 
       if (typeof instructions !== "string" || !instructions.trim()) {
         Logger.warn(
-          `${this._apiName}: Call is missing 'instructions'. Result may be unpredictable.`,
+          `${this._apiName}: Call is missing 'instructions'. Result may be unpredictable.`
         );
         // Consider throwing: throw new TypeError(`${this._apiName}: 'instructions' option is required.`);
       }
@@ -2510,7 +2526,7 @@
     async rewrite(text, callOptions = {}) {
       if (typeof text !== "string") {
         throw new TypeError(
-          `Input 'text' for ${this._apiName}.rewrite must be a string.`,
+          `Input 'text' for ${this._apiName}.rewrite must be a string.`
         );
       }
       if (
@@ -2519,7 +2535,7 @@
       ) {
         // Throwing error as instructions are essential for rewriter
         throw new TypeError(
-          "Missing 'instructions' in callOptions for rewriter.rewrite",
+          "Missing 'instructions' in callOptions for rewriter.rewrite"
         );
       }
 
@@ -2549,7 +2565,7 @@
     rewriteStreaming(text, callOptions = {}) {
       if (typeof text !== "string") {
         throw new TypeError(
-          `Input 'text' for ${this._apiName}.rewriteStreaming must be a string.`,
+          `Input 'text' for ${this._apiName}.rewriteStreaming must be a string.`
         );
       }
       if (
@@ -2557,7 +2573,7 @@
         !callOptions.instructions.trim()
       ) {
         throw new TypeError(
-          "Missing 'instructions' in callOptions for rewriter.rewriteStreaming",
+          "Missing 'instructions' in callOptions for rewriter.rewriteStreaming"
         );
       }
 
@@ -2600,7 +2616,7 @@
         !options.sourceLanguage
       ) {
         throw new TypeError(
-          `${Config.EMULATED_NAMESPACE}.Translator: Missing or invalid 'sourceLanguage' option.`,
+          `${Config.EMULATED_NAMESPACE}.Translator: Missing or invalid 'sourceLanguage' option.`
         );
       }
       if (
@@ -2608,7 +2624,7 @@
         !options.targetLanguage
       ) {
         throw new TypeError(
-          `${Config.EMULATED_NAMESPACE}.Translator: Missing or invalid 'targetLanguage' option.`,
+          `${Config.EMULATED_NAMESPACE}.Translator: Missing or invalid 'targetLanguage' option.`
         );
       }
 
@@ -2619,11 +2635,11 @@
 
       const sourceLanguageLong = Utils.languageTagToHumanReadable(
         this._sourceLanguage,
-        "en",
+        "en"
       );
       const targetLanguageLong = Utils.languageTagToHumanReadable(
         this._targetLanguage,
-        "en",
+        "en"
       );
 
       this._systemPrompt = Config.buildSystemPrompt("Translator", {
@@ -2642,7 +2658,7 @@
         throw reason;
       }
       Logger.log(
-        `${this._apiName}: Instance created. Source: ${this._sourceLanguage} (${sourceLanguageLong}), Target: ${this._targetLanguage} (${targetLanguageLong})`,
+        `${this._apiName}: Instance created. Source: ${this._sourceLanguage} (${sourceLanguageLong}), Target: ${this._targetLanguage} (${targetLanguageLong})`
       );
 
       // Translator implies plain-text output
@@ -2658,7 +2674,7 @@
       clonedInstance._targetLanguage = this._targetLanguage;
       clonedInstance._systemPrompt = this._systemPrompt;
       Logger.log(
-        `${this._apiName}: Cloned instance (Source: ${this._sourceLanguage}, Target: ${this._targetLanguage}).`,
+        `${this._apiName}: Cloned instance (Source: ${this._sourceLanguage}, Target: ${this._targetLanguage}).`
       );
       return clonedInstance;
     }
@@ -2671,7 +2687,7 @@
     async translate(text, callOptions = {}) {
       if (typeof text !== "string") {
         throw new TypeError(
-          `Input 'text' for ${this._apiName}.translate must be a string.`,
+          `Input 'text' for ${this._apiName}.translate must be a string.`
         );
       }
       // Force plain-text format
@@ -2693,7 +2709,7 @@
     translateStreaming(text, callOptions = {}) {
       if (typeof text !== "string") {
         throw new TypeError(
-          `Input 'text' for ${this._apiName}.translateStreaming must be a string.`,
+          `Input 'text' for ${this._apiName}.translateStreaming must be a string.`
         );
       }
       // Force plain-text format
@@ -2725,18 +2741,18 @@
         "LanguageDetector",
         apiKey,
         Config.DEFAULT_LANGUAGE_DETECTOR_MODEL,
-        options,
+        options
       );
 
       if (options.expectedInputLanguages) {
         if (
           !Array.isArray(options.expectedInputLanguages) ||
           options.expectedInputLanguages.some(
-            (lang) => typeof lang !== "string",
+            (lang) => typeof lang !== "string"
           )
         ) {
           throw new TypeError(
-            `${this._apiName}: 'expectedInputLanguages' must be an array of strings.`,
+            `${this._apiName}: 'expectedInputLanguages' must be an array of strings.`
           );
         }
         this._expectedInputLanguages = [...options.expectedInputLanguages];
@@ -2773,10 +2789,19 @@
      * @param {object} [callOptions={}] See Chrome AI spec for options
      * @returns {Promise<Array<object>>} Array of detected languages with confidence.
      */
+    detectLanguage(text, callOptions = {}) {
+      return this.detect(text, callOptions);
+    }
+
+    /**
+     * @param {string} text
+     * @param {object} [callOptions={}] See Chrome AI spec for options
+     * @returns {Promise<Array<object>>} Array of detected languages with confidence.
+     */
     async detect(text, callOptions = {}) {
       if (typeof text !== "string") {
         throw new TypeError(
-          `Input 'text' for ${this._apiName}.detect must be a string.`,
+          `Input 'text' for ${this._apiName}.detect must be a string.`
         );
       }
       // Force JSON format
@@ -2797,7 +2822,7 @@
 
       if (!responseJsonString || typeof responseJsonString !== "string") {
         Logger.warn(
-          `${this._apiName}: Received empty or non-string response from API. Using fallback result.`,
+          `${this._apiName}: Received empty or non-string response from API. Using fallback result.`
         );
         return results;
       }
@@ -2815,7 +2840,7 @@
               item.detectedLanguage.length > 0 &&
               typeof item.confidence === "number" &&
               item.confidence >= 0 &&
-              item.confidence <= 1,
+              item.confidence <= 1
           )
         ) {
           // Ensure there's at least one result, otherwise fallback
@@ -2827,14 +2852,14 @@
             }
           } else {
             Logger.warn(
-              `${this._apiName}: Model response was an empty JSON array. Using fallback result.`,
+              `${this._apiName}: Model response was an empty JSON array. Using fallback result.`
             );
             results = [{ detectedLanguage: "und", confidence: 1.0 }];
           }
         } else {
           Logger.warn(
             `${this._apiName}: Model response parsed as JSON but has invalid structure. Using fallback result. Response:`,
-            JSON.stringify(parsed).substring(0, 300), // Log snippet
+            JSON.stringify(parsed).substring(0, 300) // Log snippet
           );
           results = [{ detectedLanguage: "und", confidence: 1.0 }];
         }
@@ -2842,7 +2867,7 @@
         Logger.warn(
           `${this._apiName}: Failed to parse model JSON response. Using fallback result. Error: ${parseError.message}`,
           "Raw Response:",
-          responseJsonString.substring(0, 300), // Log snippet
+          responseJsonString.substring(0, 300) // Log snippet
         );
         results = [{ detectedLanguage: "und", confidence: 1.0 }];
       }
@@ -2913,7 +2938,7 @@
           if (!(await KeyManager.ensureApiKeyLoaded())) {
             const error = new APIError(
               `${apiName}: Cannot create instance, API Key is not configured.`,
-              { name: "NotSupportedError" }, // Using NotSupportedError might be more spec-aligned here
+              { name: "NotSupportedError" } // Using NotSupportedError might be more spec-aligned here
             );
             Logger.error(error.message);
             throw error;
@@ -2923,7 +2948,7 @@
             const promiseKey = apiName;
             nsTarget[pendingKey][promiseKey] = { resolve, reject, options };
             Logger.log(
-              `${apiName}: Placeholder 'create' called, storing promise with key '${promiseKey}'.`,
+              `${apiName}: Placeholder 'create' called, storing promise with key '${promiseKey}'.`
             );
           });
         },
@@ -2979,7 +3004,7 @@
         if (!Object.prototype.hasOwnProperty.call(aiNamespace, name)) {
           aiNamespace[name] = createPlaceholder(name, isStatic);
         }
-        const lowerName = name.toLowerCase();
+        const lowerName = getLowerName(name);
         if (
           name !== lowerName &&
           !Object.prototype.hasOwnProperty.call(aiNamespace, lowerName)
@@ -3001,14 +3026,14 @@
 
     GM_registerMenuCommand(
       "Set OpenRouter API Key",
-      KeyManager.promptForApiKey,
+      KeyManager.promptForApiKey
     );
     GM_registerMenuCommand("Clear OpenRouter API Key", () =>
-      KeyManager.clearApiKey(true),
+      KeyManager.clearApiKey(true)
     );
     GM_registerMenuCommand(
       "Check OpenRouter Key Status",
-      KeyManager.showKeyStatus,
+      KeyManager.showKeyStatus
     );
 
     const nsTarget = Config.NAMESPACE_TARGET;
@@ -3021,7 +3046,7 @@
     const wrapStaticMethodForTracing = (
       apiName,
       methodName,
-      originalMethod,
+      originalMethod
     ) => {
       if (!Config.TRACE) return originalMethod;
 
@@ -3072,7 +3097,7 @@
         if (!apiKey) {
           const error = new APIError(
             `${apiName}: Cannot create instance, API Key is not configured.`,
-            { name: "NotSupportedError" },
+            { name: "NotSupportedError" }
           );
           pending?.reject?.(error);
           if (pending) delete pendingPromises[promiseKey];
@@ -3107,12 +3132,12 @@
         availability: wrapStaticMethodForTracing(
           apiName,
           "availability",
-          originalAvailability,
+          originalAvailability
         ),
         capabilities: wrapStaticMethodForTracing(
           apiName,
           "capabilities",
-          originalCapabilities,
+          originalCapabilities
         ),
         create: wrapStaticMethodForTracing(apiName, "create", originalCreate),
       };
@@ -3158,13 +3183,13 @@
         baseApi.capabilities = wrapStaticMethodForTracing(
           apiName,
           "capabilities",
-          translatorCapabilitiesLogic,
+          translatorCapabilitiesLogic
         );
         // Wrap the language pair availability logic
         baseApi.languagePairAvailable = wrapStaticMethodForTracing(
           apiName,
           "languagePairAvailable",
-          translatorLanguagePairAvailableLogic,
+          translatorLanguagePairAvailableLogic
         );
       }
       return baseApi;
@@ -3227,7 +3252,7 @@
               `${targetName} API is disabled in configuration.`,
               {
                 name: "NotSupportedError",
-              },
+              }
             );
           };
           aiNamespace[targetName].availability = async () => "unavailable";
@@ -3248,13 +3273,13 @@
 
       if (enabled) {
         assignImplementation(name); // Assign to primary name
-        const lowerName = name.toLowerCase();
+        const lowerName = getLowerName(name);
         if (name !== lowerName) {
           assignImplementation(lowerName); // Assign to lowercase alias
         }
       } else {
         markDisabled(name); // Mark primary name as disabled
-        const lowerName = name.toLowerCase();
+        const lowerName = getLowerName(name);
         if (name !== lowerName) {
           markDisabled(lowerName); // Mark alias as disabled
         }
@@ -3278,7 +3303,7 @@
 
     if (!openRouterApiKey) {
       Logger.warn(
-        `OpenRouter API Key is not set. Use the Tampermonkey menu ('Set OpenRouter API Key') to configure it. All API calls will fail until a key is provided.`,
+        `OpenRouter API Key is not set. Use the Tampermonkey menu ('Set OpenRouter API Key') to configure it. All API calls will fail until a key is provided.`
       );
       // Reject any pending promises that might still exist if create() was called before init finished
       Object.entries(pendingPromises).forEach(([apiName, { reject }]) => {
@@ -3286,14 +3311,14 @@
           reject(
             new APIError(
               `${apiName}: API key not configured at initialization time.`,
-              { name: "NotSupportedError" },
-            ),
+              { name: "NotSupportedError" }
+            )
           );
         }
       });
       // Clear the map after rejecting
       Object.keys(pendingPromises).forEach(
-        (key) => delete pendingPromises[key],
+        (key) => delete pendingPromises[key]
       );
     } else {
       Logger.log(`OpenRouter API Key loaded and ready.`);
@@ -3301,11 +3326,11 @@
       Object.entries(pendingPromises).forEach(
         ([apiName, { reject, options }]) => {
           Logger.warn(
-            `API ${apiName} had a pending 'create' call during initialization. Attempting to resolve now.`,
+            `API ${apiName} had a pending 'create' call during initialization. Attempting to resolve now.`
           );
           // Re-attempt creation (this duplicates the logic in createApiStatic slightly)
           const apiDef = apiDefinitions.find(
-            (def) => def.name === apiName || def.name.toLowerCase() === apiName,
+            (def) => def.name === apiName || def.name.toLowerCase() === apiName
           );
           if (apiDef && aiNamespace[apiName]) {
             aiNamespace[apiName]
@@ -3315,12 +3340,12 @@
           } else {
             pending.reject(
               new APIError(
-                `${apiName}: Could not find API definition to resolve pending promise.`,
-              ),
+                `${apiName}: Could not find API definition to resolve pending promise.`
+              )
             );
           }
           delete pendingPromises[apiName]; // Clean up after attempt
-        },
+        }
       );
     }
 
@@ -3361,15 +3386,17 @@
     setupPlaceholders();
     const setupEnd = performance.now();
     Logger.log(
-      `Placeholder setup completed in ${(setupEnd - scriptStartTime).toFixed(2)}ms`,
+      `Placeholder setup completed in ${(setupEnd - scriptStartTime).toFixed(
+        2
+      )}ms`
     );
   } catch (e) {
     console.error(
       `[${Config.EMULATED_NAMESPACE}] FATAL ERROR during placeholder setup:`,
-      e,
+      e
     );
     alert(
-      `Chrome AI Emulator: Fatal error during initial setup. Check console. Error: ${e.message}`,
+      `Chrome AI Emulator: Fatal error during initial setup. Check console. Error: ${e.message}`
     );
     return;
   }
@@ -3382,7 +3409,9 @@
       .finally(() => {
         const initEnd = performance.now();
         Logger.log(
-          `API initialization finished at ${initEnd.toFixed(2)}ms (duration: ${(initEnd - initStart).toFixed(2)}ms)`,
+          `API initialization finished at ${initEnd.toFixed(2)}ms (duration: ${(
+            initEnd - initStart
+          ).toFixed(2)}ms)`
         );
       });
   }
@@ -3390,7 +3419,7 @@
   function handleInitError(error) {
     Logger.error(`Fatal error during API initialization:`, error);
     alert(
-      `Chrome AI Emulator: Failed to initialize APIs. Check console for details. Error: ${error.message}`,
+      `Chrome AI Emulator: Failed to initialize APIs. Check console for details. Error: ${error.message}`
     );
     // Mark APIs as unavailable
     const nsTarget = Config.NAMESPACE_TARGET;
@@ -3401,7 +3430,7 @@
         if (apiObj && typeof apiObj === "object") {
           const errorToThrow = new APIError(
             `API initialization failed: ${error.message}`,
-            { name: "NotSupportedError" },
+            { name: "NotSupportedError" }
           );
           apiObj.availability = async () => "unavailable";
           apiObj.capabilities = async () => ({ available: "no" });
@@ -3414,7 +3443,7 @@
         }
       });
       Logger.warn(
-        "Marked all emulated APIs as unavailable due to initialization error.",
+        "Marked all emulated APIs as unavailable due to initialization error."
       );
     }
   }

@@ -114,6 +114,29 @@ const summary = await summarizer.summarize(longText);
 console.log(summary);
 ```
 
+### Using the Language Detector API
+
+```javascript
+// Create a language detector instance
+// No specific create options are typically needed for language detection
+const languageDetector = await window.ai.languageDetector.create();
+
+// Detect language(s) in text
+const textToDetect = "Bonjour le monde, comment ça va aujourd'hui?";
+const detectedLanguages = await languageDetector.detectLanguage(textToDetect);
+
+// detectedLanguages will be an array of objects, e.g.:
+// [
+//   { "detectedLanguage": "fr", "confidence": 0.95 },
+//   { "detectedLanguage": "en", "confidence": 0.03 }
+// ]
+console.log(detectedLanguages);
+
+// Check availability
+const langDetectAvailability = await window.ai.languageDetector.availability();
+console.log(`Language Detector Available: ${langDetectAvailability}`);
+```
+
 ## Advanced Configuration
 
 ### API Options & Parameters
@@ -184,6 +207,10 @@ const capabilities = await window.ai.languageModel.capabilities();
 // For translator
 const translatorCapabilities = await window.ai.translator.capabilities();
 // Access specific translator capabilities like languagePairAvailable
+
+// For language detector
+const langDetectorCapabilities = await window.ai.languageDetector.capabilities();
+// Access specific language detector capabilities (if any are defined beyond basic availability)
 ```
 
 ## Demo Sites
